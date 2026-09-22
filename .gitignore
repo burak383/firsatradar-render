@@ -1,0 +1,8 @@
+node_modules/
+__pycache__/
+*.session
+*.session-journal
+.env
+backend/data/
+backend/public/telegram-images/
+telegram_listener/data/
