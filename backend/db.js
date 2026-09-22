@@ -275,6 +275,29 @@ function seedIfEmpty() {
 
 seedIfEmpty();
 
+// Telegram entegrasyonu devreye girdikten sonra, "kategoriler bos
+// gorunmesin" diye eklenen ornek/dolgu urunler (source='manual' --
+// Sony, Philips, AirPods vb., URL'lerinde "example-" gecen sahte
+// linkler) artik gereksiz ve kafa karistiriyor: gercek Telegram
+// verisiyle ayni listede/alarmlarda goruniyorlardi. Gercek veri
+// geldiyse (source='telegram' en az bir satir varsa) bu dolgu
+// kayitlari bir kere temizleriz; alarms/price_history de ON DELETE
+// CASCADE ile birlikte silinir. Henuz hic gercek veri yoksa
+// dokunmuyoruz (o zaman placeholder'lar hala isine yariyor).
+function cleanupDemoDataIfRealDataExists() {
+  const { count: telegramCount } = db
+    .prepare("SELECT COUNT(*) AS count FROM products WHERE source = 'telegram'")
+    .get();
+  if (telegramCount === 0) return;
+
+  const info = db.prepare("DELETE FROM products WHERE source = 'manual'").run();
+  if (info.changes > 0) {
+    console.log(`[db] ${info.changes} ornek/demo urun temizlendi (artik gercek Telegram verisi var).`);
+  }
+}
+
+cleanupDemoDataIfRealDataExists();
+
 if (require.main === module && process.argv.includes('--seed')) {
   console.log('[db] DB hazir:', DB_PATH);
 }
