@@ -191,6 +191,23 @@ def parse_message(text: str) -> ParsedOffer:
     else:
         offer.product_guess = _guess_product_name(text, None)
 
+    # Bazi kanallar "Eski fiyat 12.999 TL / Yeni fiyat 8.499 TL" gibi iki
+    # fiyati yan yana yazar ama yuzdeyi ayrica belirtmez (yukaridaki
+    # DISCOUNT_RE hicbir sey yakalamaz). Bu durumda mesaj gercekte bir
+    # indirim bildiriyor olsa da discount_percent bos kalir, urun geri
+    # ucta "indirim"siz duz bir fiyat gibi kaydedilir. Tam olarak IKI
+    # para birimli fiyat eslesmesi varsa (daha fazlasi -- birden fazla
+    # urun/kargo ucreti gibi belirsiz durumlar -- icin bu tahmine
+    # girmiyoruz), en yuksegini "eski fiyat" sayip yuzdeyi kendimiz
+    # turetelim.
+    if offer.discount_percent is None and len(currency_matches) == 2:
+        amounts = sorted(a for _, a in currency_matches)
+        low, high = amounts[0], amounts[1]
+        if low == offer.price_amount and high > low > 0:
+            computed = round((high - low) / high * 100)
+            if 0 < computed < 100:
+                offer.discount_percent = computed
+
     return offer
 
 
