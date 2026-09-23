@@ -106,4 +106,38 @@ router.get('/me', (req, res) => {
   }
 });
 
+// POST /api/auth/delete-account { email, password }
+// -----------------------------------------------------------------------
+// Google Play (ve App Store) uygulamayi yayinlamadan once, hesabi olan
+// kullanicilarin -- uygulamayi silseler bile -- hesap silme TALEP
+// edebilecekleri herkese acik bir yol istiyor (bkz. legalPages.js'teki
+// /hesap-silme sayfasi, bu uca istek atan basit bir web formu). Kimlik
+// dogrulamasini JWT yerine e-posta+sifre ile yapiyoruz cunku bu sayfa
+// uygulama acik olmadan, tarayicidan da kullanilabilmeli.
+//
+// Silme GERCEK ve KALICI: hesap ve o hesaba bagli TUM fiyat alarmlari
+// veritabanindan tamamen kaldirilir, hicbir yedek/arsiv tutulmaz.
+router.post('/delete-account', async (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  const password = (req.body?.password || '').toString();
+
+  const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  if (!row) {
+    return res.status(401).json({ error: 'E-posta veya şifre hatalı.' });
+  }
+  const ok = await bcrypt.compare(password, row.password_hash);
+  if (!ok) {
+    return res.status(401).json({ error: 'E-posta veya şifre hatalı.' });
+  }
+
+  const deleteAlarms = db.prepare('DELETE FROM alarms WHERE user_id = ?');
+  const deleteUser = db.prepare('DELETE FROM users WHERE id = ?');
+  db.transaction(() => {
+    deleteAlarms.run(row.id);
+    deleteUser.run(row.id);
+  })();
+
+  res.json({ ok: true });
+});
+
 module.exports = router;

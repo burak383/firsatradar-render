@@ -11,7 +11,7 @@ const categoriesRouter = require('./routes/categories');
 const searchRouter = require('./routes/search');
 const alarmsRouter = require('./routes/alarms');
 const authRouter = require('./routes/auth');
-const { renderPrivacyPolicy } = require('./legalPages');
+const { renderPrivacyPolicy, renderAccountDeletionPage } = require('./legalPages');
 
 const app = express();
 app.use(cors());
@@ -23,6 +23,10 @@ app.get('/api/health', (req, res) => res.json({ ok: true, service: 'firsatradar-
 // alani icin -- giris gerektirmeyen, herkese acik bir sayfa olmali (bkz.
 // legalPages.js).
 app.get('/privacy', renderPrivacyPolicy);
+
+// Google Play'in "Hesap silme URL'si" (Data safety) alani icin -- gercek,
+// kendi-kendine-hizmet bir silme formu (bkz. legalPages.js).
+app.get('/hesap-silme', renderAccountDeletionPage);
 
 // telegram_listener'in indirdigi urun fotograflarini servis eder --
 // import_telegram_signals.js bu klasordeki dosyalara
