@@ -62,6 +62,17 @@ CREATE TABLE IF NOT EXISTS alarms (
   created_at TEXT NOT NULL
 );
 
+-- Gercek hesap sistemi (e-posta + sifre giris/kayit -- bkz. routes/auth.js).
+-- Alarmlar onceden sadece cihaz kimligiyle (device_id) tutuluyordu; artik
+-- bir kullanici hesabina da baglanabiliyor (bkz. asagidaki alarms.user_id
+-- migration'i).
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_price_history_product ON price_history(product_id, checked_at);
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
 CREATE INDEX IF NOT EXISTS idx_products_store ON products(store);
@@ -70,6 +81,19 @@ CREATE INDEX IF NOT EXISTS idx_alarms_device ON alarms(device_id);
 `;
 
 db.exec(SCHEMA);
+
+// --- Migration: alarms.user_id -----------------------------------------
+// SCHEMA yukarida "CREATE TABLE IF NOT EXISTS" oldugu icin zaten var olan
+// (eski) bir veritabaninda alarms tablosuna otomatik yeni sutun eklenmez --
+// bu yuzden db.py'deki ayni yaklasimla burada da ayrica bir ALTER TABLE
+// migration'i yapiyoruz. Giris yapmis bir kullanicinin alarmlari
+// user_id'ye baglanir; misafir/cihaz-bazli alarmlar (user_id NULL) eskisi
+// gibi device_id ile calismaya devam eder.
+const alarmsColumns = db.prepare('PRAGMA table_info(alarms)').all().map((c) => c.name);
+if (!alarmsColumns.includes('user_id')) {
+  db.exec('ALTER TABLE alarms ADD COLUMN user_id INTEGER REFERENCES users(id)');
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_alarms_user ON alarms(user_id)');
 
 function nowIso() {
   return new Date().toISOString();
@@ -302,4 +326,4 @@ if (require.main === module && process.argv.includes('--seed')) {
   console.log('[db] DB hazir:', DB_PATH);
 }
 
-module.exports = { db, nowIso };
+module.exports = { db, nowIso, DB_PATH };

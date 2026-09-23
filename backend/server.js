@@ -10,6 +10,7 @@ const dealsRouter = require('./routes/deals');
 const categoriesRouter = require('./routes/categories');
 const searchRouter = require('./routes/search');
 const alarmsRouter = require('./routes/alarms');
+const authRouter = require('./routes/auth');
 
 const app = express();
 app.use(cors());
@@ -58,6 +59,7 @@ app.use('/api/deals', dealsRouter);
 app.use('/api/categories', categoriesRouter);
 app.use('/api/search', searchRouter);
 app.use('/api/alarms', alarmsRouter);
+app.use('/api/auth', authRouter);
 
 app.use((req, res) => res.status(404).json({ error: 'Bulunamadi' }));
 
