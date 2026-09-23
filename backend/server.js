@@ -11,12 +11,18 @@ const categoriesRouter = require('./routes/categories');
 const searchRouter = require('./routes/search');
 const alarmsRouter = require('./routes/alarms');
 const authRouter = require('./routes/auth');
+const { renderPrivacyPolicy } = require('./legalPages');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 app.get('/api/health', (req, res) => res.json({ ok: true, service: 'firsatradar-backend' }));
+
+// Google Play / App Store yayin formlarindaki "Gizlilik politikasi URL'si"
+// alani icin -- giris gerektirmeyen, herkese acik bir sayfa olmali (bkz.
+// legalPages.js).
+app.get('/privacy', renderPrivacyPolicy);
 
 // telegram_listener'in indirdigi urun fotograflarini servis eder --
 // import_telegram_signals.js bu klasordeki dosyalara
