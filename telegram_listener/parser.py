@@ -42,6 +42,24 @@ DISCOUNT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "2500/500", "2.500/500 TL", "₺2500/500" gibi egik cizgiyle ayrilmis
+# eski/yeni fiyat ciftini yakalar. (?<![\d/]) / (?![\d/]) sinirlari,
+# "12/500/300" gibi uc parcali bir zincirin ortasindan yanlislikla
+# eslesmeyi engeller.
+SLASH_PRICE_RE = re.compile(
+    r"""
+    (?<![\d/])
+    (?P<currency_pre>₺)?\s*
+    (?P<old>\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)
+    \s*/\s*
+    (?P<new>\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)
+    (?![\d/])
+    \s*
+    (?P<currency_post>TL|₺|lira)?
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 URL_RE = re.compile(r"https?://\S+")
 
 # Bilinen kisa link / yonlendirme domainleri (affiliate linkleri de dahil)
@@ -88,6 +106,14 @@ def _to_float(amount_str: str) -> float:
         return float(s)
     except ValueError:
         return float("nan")
+
+
+def _strip_urls(text: str) -> str:
+    """SLASH_PRICE_RE'yi linklerden korumak icin kullanilir -- 't.me/kanal/
+    123/456' gibi bir URL'nin yol parcalari egik cizgili bir fiyat ciftiyle
+    (orn. "123/456") karistirilmasin diye once linkleri metinden cikarir.
+    """
+    return URL_RE.sub(" ", text)
 
 
 def _clean_candidate(s: str) -> str:
@@ -183,6 +209,14 @@ def parse_message(text: str) -> ParsedOffer:
         m, amount = plain_matches[0]
         best_match = (m, False, amount)
 
+    # SLASH_PRICE_RE asagida bu degeri kullanacak: eger fiyat SADECE zayif
+    # bir "para birimsiz ilk sayi" tahminiyle bulunduysa (currency_matches
+    # bos, plain_matches[0] gibi -- ornegin "Note 13" gibi bir model
+    # numarasi bile olabilir), egik cizgili net bir fiyat cifti bulunursa
+    # onun ezmesine izin veriyoruz. Gercek bir para birimli eslesme
+    # (currency_matches) zaten guvenilir oldugu icin ona dokunmuyoruz.
+    price_is_weak_guess = not bool(currency_matches)
+
     if best_match:
         m, _, amount = best_match
         offer.price_amount = amount
@@ -207,6 +241,28 @@ def parse_message(text: str) -> ParsedOffer:
             computed = round((high - low) / high * 100)
             if 0 < computed < 100:
                 offer.discount_percent = computed
+
+    # "2500/500" gibi egik cizgiyle ayrilmis eski/yeni fiyat ciftini de
+    # indirim sinyali sayiyoruz (yukaridaki iki-ayri-fiyat-eslesmesi
+    # mantigi bunu yakalamaz, cunku burada TEK bir eslesme icinde iki
+    # sayi var). Linkler icindeki sayisal yol parcalarindan ("t.me/
+    # kanal/123/456") yanlislikla tetiklenmesin diye linkleri cikarilmis
+    # metin uzerinde ariyoruz. "23/09" gibi bir tarihle karismasin diye
+    # eski fiyatin makul bir tutar (>=50) olmasini ve eski > yeni
+    # olmasini sartiyoruz.
+    slash_match = SLASH_PRICE_RE.search(_strip_urls(text))
+    if slash_match:
+        old_val = _to_float(slash_match.group("old"))
+        new_val = _to_float(slash_match.group("new"))
+        if old_val == old_val and new_val == new_val and old_val > new_val >= 1 and old_val >= 50:
+            if offer.price_amount is None or price_is_weak_guess:
+                offer.price_amount = new_val
+                offer.price_currency = "TRY"
+                offer.product_guess = _guess_product_name(text, slash_match.span())
+            if offer.discount_percent is None:
+                computed = round((old_val - new_val) / old_val * 100)
+                if 0 < computed < 100:
+                    offer.discount_percent = computed
 
     return offer
 
