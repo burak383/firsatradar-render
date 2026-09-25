@@ -399,3 +399,66 @@ if (pendingNotifications.length > 0) {
       console.error('[import] Push bildirimleri gonderilirken hata:', e.message);
     });
 }
+
+// --- Eski (dogrulanmamis) urunlerin temizligi ---------------------------
+// Bu script her ~5 dakikada bir calisiyor (bkz. render_start.js), bu yuzden
+// "urunler bir gun sonra silinsin, diskte yer kaplamasin" isteğini burada,
+// import'un dogal bir devami olarak uyguluyoruz.
+//
+// "verified_at", bir urunun Telegram kanallarinda EN SON ne zaman
+// goruldugunu/dogrulandigini tutar (ayni magaza+baslik tekrar gelince
+// yukarida tazeleniyor). STALE_PRODUCT_HOURS (varsayilan 24 saat) suredir
+// hicbir kanalda tekrar gorulmemis -- yani artik muhtemelen gecersiz/
+// tukenmis -- urunler hem veritabanindan hem de kalici diskteki indirilmis
+// gorsel dosyasindan silinir. AKTIF fiyat alarmi olan urunler bu
+// temizlikten MUAF tutulur -- yoksa kullanicinin takip ettigi bir alarm
+// sessizce ortadan kaybolur.
+const STALE_PRODUCT_HOURS = Number(process.env.STALE_PRODUCT_HOURS || 24);
+const TELEGRAM_IMAGES_DIR =
+  process.env.TELEGRAM_IMAGES_DIR || path.join(__dirname, 'public', 'telegram-images');
+
+function deleteImageFileFor(imageUrl) {
+  if (!imageUrl) return;
+  try {
+    const marker = '/telegram-images/';
+    const idx = imageUrl.indexOf(marker);
+    if (idx === -1) return;
+    const filename = decodeURIComponent(imageUrl.slice(idx + marker.length));
+    if (!filename) return;
+    fs.unlinkSync(path.join(TELEGRAM_IMAGES_DIR, filename));
+  } catch (e) {
+    if (e.code !== 'ENOENT') {
+      console.error(`[cleanup] Gorsel dosyasi silinemedi (${imageUrl}):`, e.message);
+    }
+  }
+}
+
+function cleanupStaleProducts() {
+  const cutoff = new Date(Date.now() - STALE_PRODUCT_HOURS * 3600 * 1000).toISOString();
+  const staleRows = backendDb
+    .prepare(
+      `SELECT id, image_url FROM products
+       WHERE source = 'telegram' AND verified_at IS NOT NULL AND verified_at < ?
+         AND id NOT IN (SELECT product_id FROM alarms WHERE active = 1)`
+    )
+    .all(cutoff);
+
+  if (staleRows.length === 0) return;
+
+  for (const row of staleRows) {
+    deleteImageFileFor(row.image_url);
+  }
+
+  const deleteMany = backendDb.transaction((idsList) => {
+    const del = backendDb.prepare('DELETE FROM products WHERE id = ?');
+    for (const id of idsList) del.run(id);
+  });
+  deleteMany(staleRows.map((r) => r.id));
+
+  console.log(
+    `[cleanup] ${staleRows.length} eski urun (>${STALE_PRODUCT_HOURS} saattir Telegram'da tekrar gorulmedi) ` +
+      've gorselleri silindi.'
+  );
+}
+
+cleanupStaleProducts();

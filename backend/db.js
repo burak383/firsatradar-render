@@ -113,7 +113,9 @@ CREATE INDEX IF NOT EXISTS idx_price_history_product ON price_history(product_id
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
 CREATE INDEX IF NOT EXISTS idx_products_store ON products(store);
 CREATE INDEX IF NOT EXISTS idx_products_group ON products(group_slug);
+CREATE INDEX IF NOT EXISTS idx_products_verified_at ON products(verified_at);
 CREATE INDEX IF NOT EXISTS idx_alarms_device ON alarms(device_id);
+CREATE INDEX IF NOT EXISTS idx_alarms_product_active ON alarms(product_id, active);
 `;
 
 db.exec(SCHEMA);
