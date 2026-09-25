@@ -31,8 +31,23 @@ app.get('/hesap-silme', renderAccountDeletionPage);
 
 // telegram_listener'in indirdigi urun fotograflarini servis eder --
 // import_telegram_signals.js bu klasordeki dosyalara
-// http://localhost:PORT/telegram-images/<dosya> seklinde URL uretir.
-app.use('/telegram-images', express.static(path.join(__dirname, 'public', 'telegram-images')));
+// http://.../telegram-images/<dosya> seklinde URL uretir.
+//
+// ONEMLI: bu, gorseller HIC YUKLENMEDEN once burada
+// path.join(__dirname, 'public', 'telegram-images') OLARAK SABITLENMISTI --
+// oysa Render'da render_start.js, Python listener'a gorselleri KALICI
+// DISKE (TG_IMAGE_DIR=/data/telegram-images, bkz. render_start.js)
+// indirmesini soyluyor. Yani listener dosyalari /data/telegram-images'e
+// yaziyordu, ama bu route hep /app/backend/public/telegram-images
+// (container icinde HER DEPLOY'DA sifirlanan, gorseli hicbir zaman
+// icermeyen bir klasor) altina bakiyordu -- sonuc: HER telegram gorseli
+// 404 donuyordu. Simdi ayni TELEGRAM_IMAGES_DIR ortam degiskenini
+// kullanarak listener'in yazdigi klasorun AYNISINI servis ediyoruz;
+// degisken tanimli degilse (ornegin yerel Windows kurulumunda) eskisi
+// gibi backend/public/telegram-images'e duser.
+const TELEGRAM_IMAGES_DIR =
+  process.env.TELEGRAM_IMAGES_DIR || path.join(__dirname, 'public', 'telegram-images');
+app.use('/telegram-images', express.static(TELEGRAM_IMAGES_DIR));
 
 app.use('/api/deals', dealsRouter);
 app.use('/api/categories', categoriesRouter);
