@@ -5,8 +5,10 @@
 // istemci bunu Authorization: Bearer <token> basligiyla sonraki
 // isteklerde gonderir (bkz. authMiddleware.js).
 const express = require('express');
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const appleSignin = require('apple-signin-auth');
 const { db, nowIso } = require('../db');
 const { getJwtSecret } = require('../authSecret');
 
@@ -15,6 +17,11 @@ const router = express.Router();
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const TOKEN_TTL = '30d';
 const PASSWORD_HASH_ROUNDS = 10;
+
+// app.json > expo.ios.bundleIdentifier ile ayni olmali -- Apple, native
+// iOS uygulamalarinda kimlik jetonunun "aud" (audience) alanina tam olarak
+// bunu yazar; dogrulama sirasinda eslesmezse jeton reddedilir.
+const APPLE_BUNDLE_ID = 'com.firsatradar.app';
 
 function normalizeEmail(raw) {
   return (raw || '').toString().trim().toLowerCase();
@@ -83,6 +90,74 @@ router.post('/login', async (req, res) => {
   const ok = await bcrypt.compare(password, row.password_hash);
   if (!ok) {
     return res.status(401).json({ error: 'E-posta veya şifre hatalı.' });
+  }
+
+  claimDeviceAlarms(row.id, deviceId);
+
+  res.json({ token: issueToken(row), user: toPublicUser(row) });
+});
+
+// POST /api/auth/apple { identityToken, fullName?, deviceId? }
+// -----------------------------------------------------------------------
+// "Sign in with Apple" -- istemci (Giris.tsx) expo-apple-authentication ile
+// Apple'dan bir "identityToken" (imzali JWT) alir, bunu buraya gonderir.
+// Biz bu jetonu Apple'in kendi genel anahtarlariyla (apple-signin-auth,
+// https://appleid.apple.com/auth/keys) DOGRULARIZ -- istemciden gelen hicbir
+// bilgiye (email, isim) dogrudan guvenilmez, sadece jetonun icinden CIKAN
+// (ve Apple tarafindan imzalanmis) "sub" ve "email" claim'lerine guvenilir.
+//
+// "sub" Apple'in bu kullanici icin verdigi kalici, degismeyen kimlik --
+// hesabi bulmak/olusturmak icin birincil anahtar bu. E-posta genelde ilk
+// girişte gelir (Apple'in "Hide My Email" ozelligiyle bir relay adresi de
+// olabilir, sorun degil -- normal bir e-posta gibi calisir); ayni e-postayla
+// daha once e-posta/sifre hesabi acilmissa Apple girisini o hesaba baglariz.
+router.post('/apple', async (req, res) => {
+  const identityToken = (req.body?.identityToken || '').toString();
+  const deviceId = req.body?.deviceId;
+
+  if (!identityToken) {
+    return res.status(400).json({ error: 'Apple kimlik jetonu eksik.' });
+  }
+
+  let payload;
+  try {
+    payload = await appleSignin.verifyIdToken(identityToken, { audience: APPLE_BUNDLE_ID });
+  } catch (e) {
+    return res.status(401).json({ error: 'Apple ile giriş doğrulanamadı.' });
+  }
+
+  const appleId = payload?.sub;
+  if (!appleId) {
+    return res.status(401).json({ error: 'Apple ile giriş doğrulanamadı.' });
+  }
+  const emailFromToken = payload.email ? normalizeEmail(payload.email) : null;
+
+  let row = db.prepare('SELECT * FROM users WHERE apple_id = ?').get(appleId);
+
+  if (!row && emailFromToken) {
+    // Ayni e-posta ile daha once e-posta/sifre hesabi acilmissa, Apple
+    // girisini o mevcut hesaba bagla -- kullanici iki ayri hesapla
+    // karsilasmasin.
+    const existingByEmail = db.prepare('SELECT * FROM users WHERE email = ?').get(emailFromToken);
+    if (existingByEmail) {
+      db.prepare('UPDATE users SET apple_id = ? WHERE id = ?').run(appleId, existingByEmail.id);
+      row = { ...existingByEmail, apple_id: appleId };
+    }
+  }
+
+  if (!row) {
+    // Cok nadiren Apple e-posta paylasmayabilir -- bu durumda "sub"a bagli,
+    // kararli bir yer tutucu e-posta uretiyoruz (kullanicilar bunu gormez).
+    const email = emailFromToken || `apple-${appleId}@appleid.local`;
+    // users.password_hash NOT NULL -- Apple hesaplarinda sifreyle giris hic
+    // kullanilmayacagi icin rastgele, kimsenin tahmin edemeyecegi bir deger
+    // hash'leyip yer tutucu olarak yaziyoruz.
+    const randomPassword = crypto.randomBytes(32).toString('hex');
+    const passwordHash = await bcrypt.hash(randomPassword, PASSWORD_HASH_ROUNDS);
+    const info = db
+      .prepare('INSERT INTO users (email, password_hash, apple_id, created_at) VALUES (?, ?, ?, ?)')
+      .run(email, passwordHash, appleId, nowIso());
+    row = { id: info.lastInsertRowid, email, apple_id: appleId };
   }
 
   claimDeviceAlarms(row.id, deviceId);

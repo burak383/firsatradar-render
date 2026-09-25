@@ -73,6 +73,42 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TEXT NOT NULL
 );
 
+-- Profil ekranindaki "Tercihler" (takip edilen pazaryerleri, ilgi alani
+-- kategorileri, anlik bildirim tercihi) -- bkz. routes/preferences.js.
+-- Alarmlar ile ayni desen: giris yapmamis kullanicida device_id ile,
+-- giris yapmista user_id ile calisir; misafirken ayarlanmis tercihler
+-- hesaba giris yapilinca o hesaba devredilir.
+CREATE TABLE IF NOT EXISTS user_preferences (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  device_id TEXT,
+  user_id INTEGER REFERENCES users(id),
+  stores TEXT NOT NULL DEFAULT '[]',
+  categories TEXT NOT NULL DEFAULT '[]',
+  notifications_enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prefs_user_unique ON user_preferences(user_id) WHERE user_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prefs_device_unique ON user_preferences(device_id) WHERE user_id IS NULL;
+
+-- Push bildirimi jetonlari (Expo push token). Bir cihaz/kurulum tek bir
+-- token uretir (expo-notifications), bu yuzden token UNIQUE ve "upsert"
+-- deseniyle yaziliyor: ayni token tekrar kaydedilirse device_id/user_id
+-- GUNCELLENIR (alarms/preferences'taki "claim on login" desenden farkli --
+-- orada misafir satiri hesaba TASINIYOR; burada ise ayni token'i o an
+-- kullanan kim ise ona ait olarak isaretliyoruz, cunku ayni telefonda
+-- farkli hesaplarla giris cikis yapilabilir).
+CREATE TABLE IF NOT EXISTS push_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  token TEXT NOT NULL UNIQUE,
+  device_id TEXT,
+  user_id INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_tokens_user ON push_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_push_tokens_device ON push_tokens(device_id);
+
 CREATE INDEX IF NOT EXISTS idx_price_history_product ON price_history(product_id, checked_at);
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
 CREATE INDEX IF NOT EXISTS idx_products_store ON products(store);
@@ -93,7 +129,27 @@ const alarmsColumns = db.prepare('PRAGMA table_info(alarms)').all().map((c) => c
 if (!alarmsColumns.includes('user_id')) {
   db.exec('ALTER TABLE alarms ADD COLUMN user_id INTEGER REFERENCES users(id)');
 }
+if (!alarmsColumns.includes('notified_at')) {
+  // Push bildirimi gonderildiginde doldurulur (bkz.
+  // import_telegram_signals.js) -- fiyat hedefin altindayken HER import
+  // calistiginda (varsayilan 5 dk) tekrar tekrar bildirim atmamak icin.
+  // Fiyat tekrar hedefin ustune cikarsa NULL'a donuyoruz, boylece bir
+  // sonraki "hedefin altina dusme" ani yeniden bildirim uretir.
+  db.exec('ALTER TABLE alarms ADD COLUMN notified_at TEXT');
+}
 db.exec('CREATE INDEX IF NOT EXISTS idx_alarms_user ON alarms(user_id)');
+
+// --- Migration: users.apple_id -----------------------------------------
+// "Apple ile giriş yap" icin (bkz. routes/auth.js, POST /auth/apple).
+// Apple'in verdigi kararli kullanici kimligi (JWT'deki "sub" claim'i)
+// burada saklanir. NULL olabilir (e-posta/sifre ile acilmis hesaplarda
+// bos kalir); UNIQUE index NULL degerlerde tekillik aramaz, yani birden
+// fazla e-posta/sifre hesabi ayni anda apple_id=NULL olabilir, sorun degil.
+const usersColumns = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+if (!usersColumns.includes('apple_id')) {
+  db.exec('ALTER TABLE users ADD COLUMN apple_id TEXT');
+}
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_apple_id ON users(apple_id)');
 
 function nowIso() {
   return new Date().toISOString();

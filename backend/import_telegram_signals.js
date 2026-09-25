@@ -21,6 +21,8 @@ const path = require('path');
 const fs = require('fs');
 const Database = require('better-sqlite3');
 const { db: backendDb, nowIso } = require('./db');
+const { storeMeta } = require('./helpers');
+const { sendPushNotifications } = require('./pushNotifications');
 
 const telegramDbPath =
   process.argv[2] ||
@@ -36,15 +38,11 @@ if (!fs.existsSync(telegramDbPath)) {
 const tgDb = new Database(telegramDbPath, { readonly: true });
 
 // telegram_listener, yakaladigi urun fotograflarini dogrudan bu backend'in
-// gorsel klasorune indiriyor (TELEGRAM_IMAGES_DIR / TG_IMAGE_DIR); server.js
-// bu klasoru /telegram-images altinda servis ediyor (bkz. server.js).
-// Burada sadece dosya adindan tam bir URL uretiyoruz. RENDER_EXTERNAL_URL,
-// Render'in her servise otomatik verdigi genel adres -- Render'da elle bir
-// sey ayarlamaya gerek kalmasin diye once onu deniyoruz.
-const BACKEND_PUBLIC_URL =
-  process.env.RENDER_EXTERNAL_URL ||
-  process.env.BACKEND_PUBLIC_URL ||
-  `http://localhost:${process.env.PORT || 4000}`;
+// public/telegram-images/ klasorune indiriyor (bkz. telegram_listener/.env
+// icindeki TG_IMAGE_DIR); server.js bu klasoru /telegram-images altinda
+// servis ediyor (bkz. server.js). Burada sadece dosya adindan tam bir URL
+// uretiyoruz.
+const BACKEND_PUBLIC_URL = process.env.BACKEND_PUBLIC_URL || `http://localhost:${process.env.PORT || 4000}`;
 
 function imageUrlFor(imageFilename) {
   if (!imageFilename) return null;
@@ -192,6 +190,89 @@ const insertHistory = backendDb.prepare(
   `INSERT INTO price_history (product_id, price, checked_at) VALUES (?, ?, ?)`
 );
 
+// --- Push bildirimi hook noktalari --------------------------------------
+// Transaction TAMAMEN senkron olmak zorunda (better-sqlite3), bu yuzden
+// burada sadece hangi bildirimlerin gonderilecegine dair PLAIN DATA
+// topluyoruz (pendingNotifications) -- gercek gonderim (async HTTP) ancak
+// runAll() bittikten SONRA yapiliyor (bkz. dosyanin sonu).
+const findAlarmsForProduct = backendDb.prepare(
+  `SELECT * FROM alarms WHERE product_id = ? AND active = 1 AND target_price IS NOT NULL`
+);
+const markAlarmNotified = backendDb.prepare('UPDATE alarms SET notified_at = ? WHERE id = ?');
+const resetAlarmNotified = backendDb.prepare('UPDATE alarms SET notified_at = NULL WHERE id = ?');
+const findActivePreferences = backendDb.prepare(
+  `SELECT * FROM user_preferences WHERE notifications_enabled = 1`
+);
+const findPushTokensByUser = backendDb.prepare('SELECT token FROM push_tokens WHERE user_id = ?');
+const findPushTokensByDevice = backendDb.prepare(
+  'SELECT token FROM push_tokens WHERE device_id = ? AND user_id IS NULL'
+);
+
+function tokensForOwner({ userId, deviceId }) {
+  const rows = userId != null ? findPushTokensByUser.all(userId) : findPushTokensByDevice.all(deviceId);
+  return rows.map((r) => r.token);
+}
+
+const pendingNotifications = [];
+
+// Fiyat degisen (mevcut) bir urun icin: hedefin altina YENI dusen aktif
+// alarmlari bul, bildirim biriktir ve notified_at'i isaretle. Fiyat tekrar
+// hedefin ustune cikarsa notified_at'i sifirlar (bir sonraki dususte
+// tekrar bildirim gitsin diye) -- boylece 5 dakikada bir tekrar tekrar
+// bildirim gitmez.
+function collectAlarmNotifications(product, newPrice) {
+  const alarms = findAlarmsForProduct.all(product.id);
+  for (const alarm of alarms) {
+    if (newPrice <= alarm.target_price) {
+      if (!alarm.notified_at) {
+        const tokens = tokensForOwner({ userId: alarm.user_id, deviceId: alarm.device_id });
+        for (const token of tokens) {
+          pendingNotifications.push({
+            to: token,
+            title: 'Hedeflediğin fiyata ulaşıldı 🎯',
+            body: `${product.title} şimdi ₺${Math.round(newPrice).toLocaleString('tr-TR')}`,
+            data: { type: 'alarm', productId: product.id },
+          });
+        }
+        markAlarmNotified.run(nowIso(), alarm.id);
+      }
+    } else if (alarm.notified_at) {
+      resetAlarmNotified.run(alarm.id);
+    }
+  }
+}
+
+// Yeni eklenen bir urun icin: bu magazayi/kategoriyi tercih eden ve
+// bildirimleri acik olan kullanicilari bul, bildirim biriktir.
+function collectNewProductNotifications(productId, title, store, category) {
+  const meta = storeMeta(store);
+  for (const pref of findActivePreferences.all()) {
+    let stores = [];
+    let categories = [];
+    try {
+      stores = JSON.parse(pref.stores || '[]');
+    } catch {
+      stores = [];
+    }
+    try {
+      categories = JSON.parse(pref.categories || '[]');
+    } catch {
+      categories = [];
+    }
+    if (!stores.includes(store) && !categories.includes(category)) continue;
+
+    const tokens = tokensForOwner({ userId: pref.user_id, deviceId: pref.device_id });
+    for (const token of tokens) {
+      pendingNotifications.push({
+        to: token,
+        title: 'Yeni fırsat radarda 📡',
+        body: `${title} · ${meta.label}`,
+        data: { type: 'new_product', productId },
+      });
+    }
+  }
+}
+
 let created = 0;
 let updated = 0;
 let skipped = 0;
@@ -239,6 +320,7 @@ const runAll = backendDb.transaction(() => {
       });
       if (priceChanged) {
         insertHistory.run(existing.id, row.price_amount, checkedAt);
+        collectAlarmNotifications(existing, row.price_amount);
       }
       updated += 1;
     } else {
@@ -255,6 +337,7 @@ const runAll = backendDb.transaction(() => {
         updated_at: nowIso(),
       });
       insertHistory.run(info.lastInsertRowid, row.price_amount, checkedAt);
+      collectNewProductNotifications(info.lastInsertRowid, title, storeInfo.store, category);
       created += 1;
     }
   }
@@ -284,3 +367,17 @@ console.log(
     '(ilk gorulen fiyat referans yok); zaman icinde ayni urun tekrar ' +
     'yakalanip fiyati degistikce old_price/discount otomatik olusur.'
 );
+
+// Transaction bittikten SONRA, biriken push bildirimlerini gonder --
+// asagidaki hicbir hata bu scriptin exit code'unu etkilemez/import'u
+// gecersiz kilmaz (bildirim gonderimi yardimci bir adim, ana is degil).
+if (pendingNotifications.length > 0) {
+  console.log(`[import] ${pendingNotifications.length} push bildirimi gonderiliyor...`);
+  sendPushNotifications(pendingNotifications)
+    .then(({ sent, removed }) => {
+      console.log(`[import] Push bildirimleri tamam. Gonderilen: ${sent}, gecersiz/temizlenen jeton: ${removed}`);
+    })
+    .catch((e) => {
+      console.error('[import] Push bildirimleri gonderilirken hata:', e.message);
+    });
+}
