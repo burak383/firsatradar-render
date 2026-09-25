@@ -151,6 +151,41 @@ if (!usersColumns.includes('apple_id')) {
 }
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_apple_id ON users(apple_id)');
 
+// --- Migration: bozuk "localhost" gorsel URL'lerini onar ----------------
+// BACKEND_PUBLIC_URL Render'da hic ayarlanmamisti, bu yuzden
+// import_telegram_signals.js bir sure "http://localhost:<port>/..." gibi --
+// sadece Render container'inin kendi icinden erisilebilen, telefonda/
+// tarayicida ASLA calismayan -- gorsel URL'leri yaziyordu (bkz.
+// import_telegram_signals.js'teki BACKEND_PUBLIC_URL fix'i). O sirada
+// eklenen urunlerin products.image_url alani hala bu bozuk adresle
+// veritabaninda duruyor; import script'i artik dogru URL'yi uretse bile
+// bu ESKI satirlar bir sonraki fiyat guncellemesine kadar boyle kalir
+// (bkz. updateProduct'taki "sadece degisen alan guncellenir" mantigi).
+// Burada, uygulama her ac​ilisinda/deploy'da bir kereye mahsus bu bozuk
+// satirlari gercek genel adresle degistiriyoruz.
+function fixLocalhostImageUrls() {
+  const publicUrl =
+    process.env.RENDER_EXTERNAL_URL ||
+    process.env.BACKEND_PUBLIC_URL ||
+    null;
+  // Genel/public adres bilinmiyorsa (ör. yerel gelistirme ortaminda,
+  // localhost URL'leri zaten dogru oldugu icin) dokunmuyoruz.
+  if (!publicUrl) return;
+
+  const info = db
+    .prepare(
+      `UPDATE products
+       SET image_url = ? || substr(image_url, instr(image_url, '/telegram-images/'))
+       WHERE image_url LIKE 'http://localhost:%/telegram-images/%'`
+    )
+    .run(publicUrl);
+  if (info.changes > 0) {
+    console.log(`[db] ${info.changes} bozuk "localhost" gorsel URL'si onarildi.`);
+  }
+}
+
+fixLocalhostImageUrls();
+
 function nowIso() {
   return new Date().toISOString();
 }

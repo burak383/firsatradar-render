@@ -42,7 +42,25 @@ const tgDb = new Database(telegramDbPath, { readonly: true });
 // icindeki TG_IMAGE_DIR); server.js bu klasoru /telegram-images altinda
 // servis ediyor (bkz. server.js). Burada sadece dosya adindan tam bir URL
 // uretiyoruz.
-const BACKEND_PUBLIC_URL = process.env.BACKEND_PUBLIC_URL || `http://localhost:${process.env.PORT || 4000}`;
+//
+// ONEMLI (bug fix): BACKEND_PUBLIC_URL Render'da hic set edilmemisti, bu
+// yuzden asagidaki fallback devreye giriyor ve gorsel URL'leri
+// "http://localhost:10000/telegram-images/..." gibi -- yani Render
+// container'inin KENDI ICINDEN baska hicbir yerden (kullanicinin telefonu,
+// tarayicisi) ERISILEMEYEN bir adresle -- veritabanina yaziliyordu. Bu
+// yuzden uygulamada urun fotograflari hep bos/gorunmuyor cikiyordu, ama
+// backend'in kendi loglarindan/curl testinden anlasilmiyordu.
+//
+// RENDER_EXTERNAL_URL, Render'in HER servise otomatik verdigi genel/public
+// adrestir (ör. https://firsatradar-render.onrender.com) -- Render
+// panelinde elle bir sey ayarlamaya GEREK KALMASIN diye once onu deniyoruz;
+// BACKEND_PUBLIC_URL hala manuel override icin destekleniyor (ör. baska bir
+// domain kullanilmak istenirse), en sonda ise yerel gelistirme icin
+// localhost'a duser.
+const BACKEND_PUBLIC_URL =
+  process.env.RENDER_EXTERNAL_URL ||
+  process.env.BACKEND_PUBLIC_URL ||
+  `http://localhost:${process.env.PORT || 4000}`;
 
 function imageUrlFor(imageFilename) {
   if (!imageFilename) return null;
