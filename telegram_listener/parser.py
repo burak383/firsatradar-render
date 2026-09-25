@@ -37,10 +37,20 @@ PRICE_RE = re.compile(
 )
 
 # "yuzde X indirim", "%X indirim", "X TL indirim"
-DISCOUNT_RE = re.compile(
-    r"(%|\byuzde\b|\bYÜZDE\b)\s*(?P<percent>\d{1,3})\s*(indirim|dustu|düştü)?",
-    re.IGNORECASE,
-)
+#
+# ONEMLI: eskiden buradaki "(indirim|dustu|düştü)?" kismi OPSIYONELDI --
+# yani metindeki HERHANGI bir "%NN" gecen yer (baglamdan bagimsiz) bir
+# fiyat indirimi sanilirdi. Bu, urun aciklamalarindaki "%99,97 Daha Az
+# Bakteri", "%50 Daha Sessiz" gibi FIYATLA ILGISIZ pazarlama istatistiklerini
+# gercek bir indirim yuzdesi gibi yakalayip, urunun gercek fiyatinin
+# (current_price) YUZLERCE KAT UZERINDE sahte bir "eski fiyat" (old_price)
+# uretmesine yol aciyordu (bkz. import_telegram_signals.js -- impliedOldPrice,
+# %99 gibi asiri yuksek bir yuzdeyle bolme neredeyse fiyati 100 kat sisiriyor).
+# Simdi DISCOUNT_PERCENT_RE + DISCOUNT_KEYWORD_RE ikilisiyle, yuzdenin
+# GERCEKTEN bir "indirim/dustu" baglaminda gectigini (once ya da sonra,
+# yakin bir pencerede) dogruluyoruz -- bkz. _find_discount_percent().
+DISCOUNT_PERCENT_RE = re.compile(r"(?:%|\byuzde\b|\bYÜZDE\b)\s*(?P<percent>\d{1,3})", re.IGNORECASE)
+DISCOUNT_KEYWORD_RE = re.compile(r"indirim|dustu|düştü|kupon", re.IGNORECASE)
 
 # "2500/500", "2.500/500 TL", "₺2500/500" gibi egik cizgiyle ayrilmis
 # eski/yeni fiyat ciftini yakalar. (?<![\d/]) / (?![\d/]) sinirlari,
@@ -138,6 +148,23 @@ def _to_float(amount_str: str) -> float:
         return float("nan")
 
 
+def _find_discount_percent(text: str) -> Optional[int]:
+    """Metinde gercekten bir FIYAT indirimini belirten bir "%NN" bulursa
+    onu dondurur; sadece pazarlama istatistigi olan (indirim baglami
+    olmayan) bir yuzdeyi (orn. "%99,97 Daha Az Bakteri") yok sayar.
+    """
+    for m in DISCOUNT_PERCENT_RE.finditer(text):
+        window = text[max(0, m.start() - 20) : m.end() + 20]
+        if DISCOUNT_KEYWORD_RE.search(window):
+            try:
+                val = int(m.group("percent"))
+            except (TypeError, ValueError):
+                continue
+            if 0 < val < 100:
+                return val
+    return None
+
+
 def _mask_coupon_slash_pairs(text: str) -> str:
     """Bir "X/Y" sayi ciftinin hemen oncesinde (60 karakterlik bir pencerede)
     "kupon"/"kod(u)"/"promosyon" gibi bir kelime geciyorsa, bu ciftin gercek
@@ -221,12 +248,7 @@ def parse_message(text: str) -> ParsedOffer:
     working_text = _mask_coupon_slash_pairs(text)
 
     # Indirim yuzdesi
-    disc_match = DISCOUNT_RE.search(text)
-    if disc_match:
-        try:
-            offer.discount_percent = int(disc_match.group("percent"))
-        except (TypeError, ValueError):
-            pass
+    offer.discount_percent = _find_discount_percent(text)
 
     # Fiyat -- metindeki TUM eslesmeleri bul, en "makul" olani sec.
     # "Eski fiyat X / Yeni fiyat Y" gibi mesajlarda bizi ilgilendiren
