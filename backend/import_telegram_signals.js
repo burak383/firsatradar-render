@@ -170,6 +170,58 @@ const STATE_KEY = 'telegram_last_raw_message_id';
 const stateRow = backendDb.prepare('SELECT value FROM import_state WHERE key = ?').get(STATE_KEY);
 const lastId = stateRow ? parseInt(stateRow.value, 10) : 0;
 
+// --- Bir kerelik temizlik: eski parser.py hatasinin uzerinde birakip
+// gittigi sahte "old_price" degerleri --------------------------------------
+// parser.py'deki yuzde-tespit hatasi (bkz. gecmis fix) bazi mesajlarda
+// alakasiz bir "%NN" ifadesini gercek indirim yuzdesi sanip yanlis bir
+// discount_percent uretiyordu; buradan da impliedOldPrice() ile COK sisirilmis
+// bir "eski fiyat" (ör. 359 TL'lik urune 35.900 TL gibi) turetilip
+// products.old_price'a yaziliyordu. parser.py fix'i YENI mesajlar icin bunu
+// onledi, ama o sirada zaten yazilmis old_price degerleri fiyat bir daha
+// degismeden urun tablosunda kaliyor (bkz. updateProduct'taki "sadece
+// degisen alan guncellenir" mantigi) -- bu yuzden hala uygulamada "%99
+// indirim" gibi sahte rozetler gorunuyordu.
+//
+// Guvenilir ayrim: old_price GERCEK bir fiyat dususunden mi geldi, yoksa
+// SADECE mesaj metnindeki yuzdeden mi tahmin edildi (impliedOldPrice)? Bir
+// urunun price_history'sinde TEK bir nokta varsa (fiyati hic gercekten
+// degismemis/tekrar dogrulanmamis demektir), o urunun old_price'i EGER
+// doluysa MUTLAKA impliedOldPrice() tahminidir -- gercek bir gozlem asla
+// olamaz (gercek gozlem icin en az 2 price_history noktasi gerekir, bkz.
+// yukarideki priceChanged mantigi). Bu yuzden bu urunlerin old_price'ini
+// sifirliyoruz; urun bir dahaki sefere Telegram'da tekrar gorulup
+// dogrulandiginda (artik DUZELTILMIS parser ile) gercek/doğru bir tahmin
+// yeniden olusur.
+//
+// import_state'te bir bayrakla iSaretleniyor ki bu TEK SEFERLIK temizlik
+// her import calismasinda (5 dakikada bir) tekrar tekrar calisip YENI, GECERLI
+// tek-gozlemli tahminleri de silmesin.
+const CORRUPTED_DISCOUNT_CLEANUP_KEY = 'cleanup_v1_unverified_implied_old_price_done';
+const cleanupDone = backendDb.prepare('SELECT value FROM import_state WHERE key = ?').get(CORRUPTED_DISCOUNT_CLEANUP_KEY);
+if (!cleanupDone) {
+  const info = backendDb
+    .prepare(
+      `UPDATE products SET old_price = NULL
+       WHERE source = 'telegram' AND old_price IS NOT NULL
+         AND id IN (
+           SELECT product_id FROM price_history GROUP BY product_id HAVING COUNT(*) = 1
+         )`
+    )
+    .run();
+  backendDb
+    .prepare(
+      `INSERT INTO import_state (key, value) VALUES (?, '1')
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+    )
+    .run(CORRUPTED_DISCOUNT_CLEANUP_KEY);
+  if (info.changes > 0) {
+    console.log(
+      `[cleanup] ${info.changes} urunun hic dogrulanmamis (sadece metin yuzdesinden tahmin edilmis) ` +
+        've eski parser hatasindan sisirilmis olabilecek "eski fiyat"i sifirlandi.'
+    );
+  }
+}
+
 const rows = tgDb
   .prepare(
     `SELECT id, channel, message_id, message_date, product_guess, price_amount,
