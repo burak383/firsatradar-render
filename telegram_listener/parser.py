@@ -37,20 +37,10 @@ PRICE_RE = re.compile(
 )
 
 # "yuzde X indirim", "%X indirim", "X TL indirim"
-#
-# ONEMLI: eskiden buradaki "(indirim|dustu|düştü)?" kismi OPSIYONELDI --
-# yani metindeki HERHANGI bir "%NN" gecen yer (baglamdan bagimsiz) bir
-# fiyat indirimi sanilirdi. Bu, urun aciklamalarindaki "%99,97 Daha Az
-# Bakteri", "%50 Daha Sessiz" gibi FIYATLA ILGISIZ pazarlama istatistiklerini
-# gercek bir indirim yuzdesi gibi yakalayip, urunun gercek fiyatinin
-# (current_price) YUZLERCE KAT UZERINDE sahte bir "eski fiyat" (old_price)
-# uretmesine yol aciyordu (bkz. import_telegram_signals.js -- impliedOldPrice,
-# %99 gibi asiri yuksek bir yuzdeyle bolme neredeyse fiyati 100 kat sisiriyor).
-# Simdi DISCOUNT_PERCENT_RE + DISCOUNT_KEYWORD_RE ikilisiyle, yuzdenin
-# GERCEKTEN bir "indirim/dustu" baglaminda gectigini (once ya da sonra,
-# yakin bir pencerede) dogruluyoruz -- bkz. _find_discount_percent().
-DISCOUNT_PERCENT_RE = re.compile(r"(?:%|\byuzde\b|\bYÜZDE\b)\s*(?P<percent>\d{1,3})", re.IGNORECASE)
-DISCOUNT_KEYWORD_RE = re.compile(r"indirim|dustu|düştü|kupon", re.IGNORECASE)
+DISCOUNT_RE = re.compile(
+    r"(%|\byuzde\b|\bYÜZDE\b)\s*(?P<percent>\d{1,3})\s*(indirim|dustu|düştü)?",
+    re.IGNORECASE,
+)
 
 # "2500/500", "2.500/500 TL", "₺2500/500" gibi egik cizgiyle ayrilmis
 # eski/yeni fiyat ciftini yakalar. (?<![\d/]) / (?![\d/]) sinirlari,
@@ -69,36 +59,6 @@ SLASH_PRICE_RE = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
-
-# "800/200TL" gibi "X TL harca, Y TL indirim kazan" bicimindeki KUPON
-# esikleri, SLASH_PRICE_RE'nin aradigi "eski fiyat/yeni fiyat" ciftiyle
-# BIREBIR AYNI gorunur ama gercek bir urun fiyati DEGILDIR -- "MODA200 Kodu
-# ile ... 800/200TL Indirim Firsati" gibi bir kupon-kodu mesaji bu yuzden
-# "200 TL'lik bir urun" sanilip yanlislikla kaydediliyordu. "kupon"/"kod(u)"/
-# "promosyon" kelimelerinden hemen sonra gecen bir X/Y ciftini asagida
-# _mask_coupon_slash_pairs() ile fiyat adayligindan tamamen cikariyoruz.
-COUPON_HINT_RE = re.compile(r"\bkupon\b|\bkod(u|unu|uyla|ları|larıyla)?\b|\bpromosyon\b", re.IGNORECASE)
-_AMOUNT_ALT = r"\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?"
-COUPON_SLASH_RE = re.compile(
-    rf"""
-    (?<![\d/])
-    (?:{_AMOUNT_ALT})
-    \s*/\s*
-    (?:{_AMOUNT_ALT})
-    (?![\d/])
-    \s*
-    (?:TL|₺|lira)?
-    """,
-    re.IGNORECASE | re.VERBOSE,
-)
-
-# "Ürün altındaki 1000 TL kupon ile." gibi mesajlarda "1000 TL" ayri (egik
-# cizgisiz) bir para-birimli eslesme olarak yakalanir ve "en dusuk fiyati
-# sec" sezgiseli bunu gercek urun fiyatinin (19.999 TL) ONUNE geciriyordu.
-# Bir para-birimli eslesmenin hemen yaninda (once veya sonra, ~20-25
-# karakter) "kupon" kelimesi geciyorsa bu bir KUPON TUTARIDIR, urun fiyati
-# degil -- fiyat adaylarindan cikariyoruz.
-COUPON_AMOUNT_CONTEXT_RE = re.compile(r"\bkupon\b", re.IGNORECASE)
 
 URL_RE = re.compile(r"https?://\S+")
 
@@ -146,41 +106,6 @@ def _to_float(amount_str: str) -> float:
         return float(s)
     except ValueError:
         return float("nan")
-
-
-def _find_discount_percent(text: str) -> Optional[int]:
-    """Metinde gercekten bir FIYAT indirimini belirten bir "%NN" bulursa
-    onu dondurur; sadece pazarlama istatistigi olan (indirim baglami
-    olmayan) bir yuzdeyi (orn. "%99,97 Daha Az Bakteri") yok sayar.
-    """
-    for m in DISCOUNT_PERCENT_RE.finditer(text):
-        window = text[max(0, m.start() - 20) : m.end() + 20]
-        if DISCOUNT_KEYWORD_RE.search(window):
-            try:
-                val = int(m.group("percent"))
-            except (TypeError, ValueError):
-                continue
-            if 0 < val < 100:
-                return val
-    return None
-
-
-def _mask_coupon_slash_pairs(text: str) -> str:
-    """Bir "X/Y" sayi ciftinin hemen oncesinde (60 karakterlik bir pencerede)
-    "kupon"/"kod(u)"/"promosyon" gibi bir kelime geciyorsa, bu ciftin gercek
-    bir urun fiyati degil bir kupon esigi/indirimi oldugunu varsayip o
-    ciftin yerine ayni uzunlukta bosluk koyar -- boylece ne PRICE_RE ne de
-    SLASH_PRICE_RE onu bir fiyat adayi olarak gormez. Karakter pozisyonlari
-    (dolayisiyla _guess_product_name'in span hesaplari) degismeden kalir.
-    """
-
-    def repl(m: "re.Match[str]") -> str:
-        window_start = max(0, m.start() - 60)
-        if COUPON_HINT_RE.search(text[window_start : m.start()]):
-            return " " * len(m.group(0))
-        return m.group(0)
-
-    return COUPON_SLASH_RE.sub(repl, text)
 
 
 def _strip_urls(text: str) -> str:
@@ -242,13 +167,13 @@ def parse_message(text: str) -> ParsedOffer:
         u for u in offer.links if any(d in u.lower() for d in KNOWN_SHOP_DOMAINS)
     ]
 
-    # Kupon esigi ciftlerini ("800/200TL" gibi) fiyat aramasindan once
-    # maskeliyoruz -- ayni uzunlukta oldugu icin asagidaki TUM span/pozisyon
-    # hesaplari (urun adi tahmini dahil) bozulmadan calismaya devam eder.
-    working_text = _mask_coupon_slash_pairs(text)
-
     # Indirim yuzdesi
-    offer.discount_percent = _find_discount_percent(text)
+    disc_match = DISCOUNT_RE.search(text)
+    if disc_match:
+        try:
+            offer.discount_percent = int(disc_match.group("percent"))
+        except (TypeError, ValueError):
+            pass
 
     # Fiyat -- metindeki TUM eslesmeleri bul, en "makul" olani sec.
     # "Eski fiyat X / Yeni fiyat Y" gibi mesajlarda bizi ilgilendiren
@@ -257,21 +182,11 @@ def parse_message(text: str) -> ParsedOffer:
     # yoksa, ilk gecerli (yil olmayan) sayiyi dusuk guvenle kullaniyoruz.
     currency_matches = []
     plain_matches = []
-    for m in PRICE_RE.finditer(working_text):
+    for m in PRICE_RE.finditer(text):
         amount = _to_float(m.group("amount"))
         has_currency = bool(m.group("currency_pre") or m.group("currency_post"))
         if amount != amount:  # NaN kontrolu
             continue
-        # Sayi hemen bir harfin ardindan geliyorsa ("MODA200", "iPhone15"
-        # gibi bir kupon/model kodunun parcasi) bu bir fiyat degildir --
-        # gercek bir fiyat hicbir zaman bir kelimeye byle bitisik yazilmaz.
-        amount_start = m.start("amount")
-        if amount_start > 0 and working_text[amount_start - 1].isalpha():
-            continue
-        if has_currency:
-            context = working_text[max(0, m.start() - 20) : m.end() + 25]
-            if COUPON_AMOUNT_CONTEXT_RE.search(context):
-                continue  # "1000 TL kupon" -- bir kupon tutari, urun fiyati degil
         if not has_currency and (amount < 1 or amount > 999999):
             continue
         if not has_currency and amount == int(amount) and len(m.group("amount")) == 4:
@@ -281,7 +196,7 @@ def parse_message(text: str) -> ParsedOffer:
             # "%45 indirim" gibi bir yuzde ifadesinin rakamini para birimsiz
             # bir "fiyat" sanmayalim -- hemen oncesinde (bosluk atlanarak)
             # '%' varsa bu bir yuzdedir, fiyat degildir.
-            before = working_text[: m.start()].rstrip()
+            before = text[: m.start()].rstrip()
             if before.endswith("%"):
                 continue
         (currency_matches if has_currency else plain_matches).append((m, amount))
@@ -306,9 +221,9 @@ def parse_message(text: str) -> ParsedOffer:
         m, _, amount = best_match
         offer.price_amount = amount
         offer.price_currency = "TRY"
-        offer.product_guess = _guess_product_name(working_text, m.span())
+        offer.product_guess = _guess_product_name(text, m.span())
     else:
-        offer.product_guess = _guess_product_name(working_text, None)
+        offer.product_guess = _guess_product_name(text, None)
 
     # Bazi kanallar "Eski fiyat 12.999 TL / Yeni fiyat 8.499 TL" gibi iki
     # fiyati yan yana yazar ama yuzdeyi ayrica belirtmez (yukaridaki
@@ -335,24 +250,15 @@ def parse_message(text: str) -> ParsedOffer:
     # metin uzerinde ariyoruz. "23/09" gibi bir tarihle karismasin diye
     # eski fiyatin makul bir tutar (>=50) olmasini ve eski > yeni
     # olmasini sartiyoruz.
-    stripped_working_text = _strip_urls(working_text)
-    slash_match = SLASH_PRICE_RE.search(stripped_working_text)
+    slash_match = SLASH_PRICE_RE.search(_strip_urls(text))
     if slash_match:
-        old_start = slash_match.start("old")
-        glued_to_word = old_start > 0 and stripped_working_text[old_start - 1].isalpha()
         old_val = _to_float(slash_match.group("old"))
         new_val = _to_float(slash_match.group("new"))
-        if (
-            not glued_to_word
-            and old_val == old_val
-            and new_val == new_val
-            and old_val > new_val >= 1
-            and old_val >= 50
-        ):
+        if old_val == old_val and new_val == new_val and old_val > new_val >= 1 and old_val >= 50:
             if offer.price_amount is None or price_is_weak_guess:
                 offer.price_amount = new_val
                 offer.price_currency = "TRY"
-                offer.product_guess = _guess_product_name(working_text, slash_match.span())
+                offer.product_guess = _guess_product_name(text, slash_match.span())
             if offer.discount_percent is None:
                 computed = round((old_val - new_val) / old_val * 100)
                 if 0 < computed < 100:
