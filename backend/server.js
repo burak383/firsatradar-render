@@ -12,7 +12,7 @@ const alarmsRouter = require('./routes/alarms');
 const authRouter = require('./routes/auth');
 const preferencesRouter = require('./routes/preferences');
 const pushTokensRouter = require('./routes/push-tokens');
-const { renderPrivacyPolicy, renderAccountDeletionPage } = require('./legalPages');
+const { renderPrivacyPolicy, renderAccountDeletionPage, renderSupportPage } = require('./legalPages');
 
 const app = express();
 app.use(cors());
@@ -28,6 +28,10 @@ app.get('/privacy', renderPrivacyPolicy);
 // Google Play'in "Hesap silme URL'si" (Data safety) alani icin -- gercek,
 // kendi-kendine-hizmet bir silme formu (bkz. legalPages.js).
 app.get('/hesap-silme', renderAccountDeletionPage);
+
+// App Store Connect'in "Support URL" alani icin -- giris gerektirmeyen,
+// herkese acik bir SSS/iletisim sayfasi (bkz. legalPages.js).
+app.get('/destek', renderSupportPage);
 
 // telegram_listener'in indirdigi urun fotograflarini servis eder --
 // import_telegram_signals.js bu klasordeki dosyalara

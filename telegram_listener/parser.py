@@ -62,6 +62,90 @@ SLASH_PRICE_RE = re.compile(
 
 URL_RE = re.compile(r"https?://\S+")
 
+
+# --- Tutar baglam siniflandirmasi -------------------------------------------
+# Eskiden metindeki para birimli EN DUSUK tutar "fiyat" sayiliyordu. Oysa
+# kanallar sik sik "Sepette 1.000 TL indirim", "7.500 TL'ye 750 TL indirim
+# kodu", "12 x 708 TL taksit", "adet basi 22 TL" gibi, URUN FIYATI OLMAYAN
+# tutarlar da yaziyor. Bu tutarlar urunun gercek fiyatindan kucuk oldugu icin
+# "en dusuk tutar" kurali onlari fiyat sanip %97-100 indirimli sahte urunler
+# (ör. 100.000 TL'lik telefon 1.000 TL) uretiyordu. Her tutarin ONCESINDEKI/
+# SONRASINDAKI kelimelere bakarak bunlari ayiklariz. Tum karsilastirmalar
+# _tr_lower() ile kucultulmus metin uzerinde yapilir.
+
+
+def _tr_lower(s: str) -> str:
+    """Turkce buyuk/kucuk harf: 'İ'->'i', 'I'->'ı'. Karakter sayisini
+    degistirmez, boylece kucultulmus metindeki indeksler orijinaliyle ayni kalir."""
+    return s.replace("İ", "i").replace("I", "ı").lower()
+
+
+# Tutardan SONRA gelirse "indirim tutari / kupon / kargo vb." demektir.
+# "indirimli/indirimsiz" haric: "8.499 TL indirimli fiyat" gercek fiyattir.
+_NON_PRICE_AFTER_RE = re.compile(
+    r"""^\s*(?:tl|₺|lira)?\s*(?:['’]\s*(?:lik|lık|luk|lük))?\s*
+        (?:ek\s+|ilave\s+|extra\s+)?
+        (?:indirim(?!li|siz)|kupon|hediye|çeki|ceki|puan|iade|cashback|bonus|ödül|ödul)""",
+    re.VERBOSE,
+)
+# Tutardan ONCE gelirse ("indirim: 500 TL", "kupon 200 TL", "kargo 25 TL").
+_NON_PRICE_BEFORE_RE = re.compile(
+    r"(?:(?:indirim|puan)\s*(?:tutarı|tutari)?\s*[:\-–=]\s*|(?:kupon|kod|hediye\s*çeki|cashback|kargo|taksit|ödül)\s*(?:tutarı|tutari)?\s*[:\-–=]?\s*)$"
+)
+# Taksit: "12 x 708 TL", "708 TL x 12", "708 TL 12 ay/taksit".
+_INSTALLMENT_BEFORE_RE = re.compile(r"\d+\s*[x×]\s*$")
+_INSTALLMENT_AFTER_RE = re.compile(r"^\s*(?:tl|₺)?\s*(?:[x×]\s*\d+|\d+\s*(?:ay|taksit)|taksit)")
+# Esik tutar: "7.500 TL ve uzeri", "2.500₺ ve Uzerine", "500 TL'ye 100 TL indirim".
+_THRESHOLD_AFTER_RE = re.compile(
+    r"""^\s*(?:tl|₺)?\s*(?:
+        ['’]?\s*(?:ye|ya|e|a|ile)?\s*(?:ve\s+)?(?:üzeri|üstü|uzeri|ustu)
+        |['’](?:ye|ya|e|a)\s+[₺\d]
+        |['’]\s*(?:ye|ya|e|a)?\s*(?:ve\s+)?(?:alışveriş|alisveris|sipariş|siparis|sepet)
+    )""",
+    re.VERBOSE,
+)
+# Birim fiyat: "22 TL/adet", "adet basi 22 TL", "100 gr fiyati".
+_UNIT_AFTER_RE = re.compile(
+    r"^\s*(?:tl|₺)?\s*(?:/\s*(?:adet|kg|lt|l|gr|g|ml|metre|m)\b|adet\s*başı|adet\s*basi|başına|basina|tanesi|tanesine|birim)"
+)
+_UNIT_BEFORE_RE = re.compile(r"(?:adet\s*başı|adet\s*basi|birim\s*fiyat[ıi]?|tanesi|kg\s*fiyat[ıi])\s*[:\-–]?\s*$")
+
+# Mesaj bir URUN degil, kupon / kampanya duyurusuysa (fiyat adayi kalmadiysa
+# ve bu kaliplardan biri varsa) urun olarak kaydedilmez.
+_COUPON_RE = re.compile(
+    r"""indirim\s*(?:kodu|kuponu|kupon|çeki|ceki)|\bkupon|hediye\s*çeki|promosyon\s*kodu
+        |kodu?\s+(?:ile|aktif|girin|kullan)
+        |(?:ve\s+)?(?:üzeri|üstü|uzeri|ustu)\s+(?:alışveriş|alisveris|sipariş|siparis|sepet)
+        |alışverişlerinizde|alisverislerinizde|alışverişinizde|alisverisinizde
+        |ve\s+(?:üzerine|üstüne|uzerine|ustune)\b""",
+    re.VERBOSE,
+)
+
+
+def _classify_amount(lowered: str, start: int, end: int) -> str:
+    """Bir tutarin urun fiyati mi yoksa baska bir sey mi oldugunu baglamdan
+    tahmin eder. 'price' disindaki her sonuc fiyat adayi sayilmaz."""
+    # Sadece AYNI SATIRDAKI baglama bak: "7.899 TL\nKupon: 200 TL" gibi
+    # alt satirdaki kelime ustteki fiyati etkilemesin.
+    before = lowered[max(0, start - 28):start].split("\n")[-1]
+    after = lowered[end:end + 48].split("\n")[0]
+    if _INSTALLMENT_BEFORE_RE.search(before) or _INSTALLMENT_AFTER_RE.match(after):
+        return "installment"
+    if _NON_PRICE_AFTER_RE.match(after) or _NON_PRICE_BEFORE_RE.search(before):
+        return "discount_amount"
+    if _THRESHOLD_AFTER_RE.match(after):
+        return "threshold"
+    if _UNIT_AFTER_RE.match(after) or _UNIT_BEFORE_RE.search(before):
+        return "unit"
+    return "price"
+
+
+# Iki fiyattan kucugu buyugunun bu oranindan azsa (ör. 1.000 TL / 100.000 TL)
+# kucuk olan buyuk ihtimalle kupon/indirim tutaridir, urun fiyati degildir.
+MIN_PLAUSIBLE_PRICE_RATIO = 0.15
+# %85'ten buyuk "indirim" gercek bir urun indirimi degil, parse hatasidir.
+MAX_PLAUSIBLE_DISCOUNT_PERCENT = 85
+
 # Bilinen kisa link / yonlendirme domainleri (affiliate linkleri de dahil)
 KNOWN_SHOP_DOMAINS = (
     "trendyol.com", "ty.gl",
@@ -82,10 +166,16 @@ class ParsedOffer:
     discount_percent: Optional[int] = None
     links: list[str] = field(default_factory=list)
     shop_links: list[str] = field(default_factory=list)
+    # Mesaj bir urun degil, kupon / kampanya duyurusu (ör. "7.500 TL'ye 750 TL
+    # indirim kodu"). True ise looks_like_offer False doner.
+    is_coupon: bool = False
 
     @property
     def looks_like_offer(self) -> bool:
-        """En az fiyat VEYA indirim yuzdesi + bir link varsa 'aday firsat' sayariz."""
+        """En az fiyat VEYA indirim yuzdesi + bir link varsa 'aday firsat' sayariz.
+        Kupon/kampanya duyurulari urun degildir, aday sayilmaz."""
+        if self.is_coupon:
+            return False
         has_signal = self.price_amount is not None or self.discount_percent is not None
         return has_signal and bool(self.links)
 
@@ -171,9 +261,15 @@ def parse_message(text: str) -> ParsedOffer:
     disc_match = DISCOUNT_RE.search(text)
     if disc_match:
         try:
-            offer.discount_percent = int(disc_match.group("percent"))
+            pct = int(disc_match.group("percent"))
+            # %85'ten buyuk degerler gercek indirim degil (parse hatasi ya da
+            # ilgisiz bir yuzde) -- yok say.
+            if 0 < pct <= MAX_PLAUSIBLE_DISCOUNT_PERCENT:
+                offer.discount_percent = pct
         except (TypeError, ValueError):
             pass
+
+    lowered = _tr_lower(text)
 
     # Fiyat -- metindeki TUM eslesmeleri bul, en "makul" olani sec.
     # "Eski fiyat X / Yeni fiyat Y" gibi mesajlarda bizi ilgilendiren
@@ -182,10 +278,22 @@ def parse_message(text: str) -> ParsedOffer:
     # yoksa, ilk gecerli (yil olmayan) sayiyi dusuk guvenle kullaniyoruz.
     currency_matches = []
     plain_matches = []
-    for m in PRICE_RE.finditer(text):
+    # URL'ler icindeki rakamlar (n11.com, /p-12345 vb.) fiyat sanilmasin: ayni
+    # uzunlukta bosluklarla degistirip indeksleri koru.
+    price_scan_text = URL_RE.sub(lambda u: " " * len(u.group(0)), text)
+    rejected_kinds = []
+    for m in PRICE_RE.finditer(price_scan_text):
         amount = _to_float(m.group("amount"))
         has_currency = bool(m.group("currency_pre") or m.group("currency_post"))
         if amount != amount:  # NaN kontrolu
+            continue
+        # Indirim tutari / kupon / esik / taksit / birim fiyat gibi URUN FIYATI
+        # OLMAYAN tutarlari ele (bkz. _classify_amount).
+        amount_end = m.end("currency_post") if m.group("currency_post") else m.end("amount")
+        kind = _classify_amount(lowered, m.start("amount"), amount_end)
+        if kind != "price":
+            if has_currency:
+                rejected_kinds.append(kind)
             continue
         if not has_currency and (amount < 1 or amount > 999999):
             continue
@@ -205,7 +313,9 @@ def parse_message(text: str) -> ParsedOffer:
     if currency_matches:
         m, amount = min(currency_matches, key=lambda pair: pair[1])
         best_match = (m, True, amount)
-    elif plain_matches:
+    elif plain_matches and not rejected_kinds:
+        # Para birimli tutarlar vardi ama hepsi indirim/esik/taksit idiyse,
+        # kalan para birimsiz sayilar (marka adi "N11", model no) fiyat degildir.
         m, amount = plain_matches[0]
         best_match = (m, False, amount)
 
@@ -238,9 +348,15 @@ def parse_message(text: str) -> ParsedOffer:
         amounts = sorted(a for _, a in currency_matches)
         low, high = amounts[0], amounts[1]
         if low == offer.price_amount and high > low > 0:
-            computed = round((high - low) / high * 100)
-            if 0 < computed < 100:
-                offer.discount_percent = computed
+            if low / high < MIN_PLAUSIBLE_PRICE_RATIO:
+                # Ör. 100.000 TL ve 1.000 TL: kucuk olan buyuk ihtimalle bir
+                # kupon/indirim tutari (baglam kelimesi yazilmamis) -- urun
+                # fiyati buyuk olandir, indirim yuzdesi uydurma.
+                offer.price_amount = high
+            else:
+                computed = round((high - low) / high * 100)
+                if 0 < computed <= MAX_PLAUSIBLE_DISCOUNT_PERCENT:
+                    offer.discount_percent = computed
 
     # "2500/500" gibi egik cizgiyle ayrilmis eski/yeni fiyat ciftini de
     # indirim sinyali sayiyoruz (yukaridaki iki-ayri-fiyat-eslesmesi
@@ -250,19 +366,39 @@ def parse_message(text: str) -> ParsedOffer:
     # metin uzerinde ariyoruz. "23/09" gibi bir tarihle karismasin diye
     # eski fiyatin makul bir tutar (>=50) olmasini ve eski > yeni
     # olmasini sartiyoruz.
-    slash_match = SLASH_PRICE_RE.search(_strip_urls(text))
+    stripped = _strip_urls(text)
+    slash_match = SLASH_PRICE_RE.search(stripped)
     if slash_match:
         old_val = _to_float(slash_match.group("old"))
         new_val = _to_float(slash_match.group("new"))
-        if old_val == old_val and new_val == new_val and old_val > new_val >= 1 and old_val >= 50:
+        slash_after = _tr_lower(stripped)[slash_match.end():slash_match.end() + 48]
+        # "7500/750 Indirim Kodu" gibi bir kupon yazimi eski/yeni fiyat cifti
+        # degildir; ayrica iki sayi arasindaki oran asiri uc ise (>%85 indirim)
+        # bu da fiyat cifti degil kupon tutaridir.
+        slash_is_coupon = bool(_NON_PRICE_AFTER_RE.match(slash_after)) or bool(
+            _COUPON_RE.search(slash_after)
+        )
+        if (
+            old_val == old_val and new_val == new_val and old_val > new_val >= 1 and old_val >= 50
+            and not slash_is_coupon
+            and new_val / old_val >= MIN_PLAUSIBLE_PRICE_RATIO
+        ):
             if offer.price_amount is None or price_is_weak_guess:
                 offer.price_amount = new_val
                 offer.price_currency = "TRY"
                 offer.product_guess = _guess_product_name(text, slash_match.span())
             if offer.discount_percent is None:
                 computed = round((old_val - new_val) / old_val * 100)
-                if 0 < computed < 100:
+                if 0 < computed <= MAX_PLAUSIBLE_DISCOUNT_PERCENT:
                     offer.discount_percent = computed
+
+    # Fiyat adayi hic kalmadiysa ve mesaj kupon/kampanya diliyle yaziliysa bu
+    # bir URUN degil, kupon duyurusudur -- urun olarak kaydedilmesin.
+    if offer.price_amount is None and (
+        _COUPON_RE.search(lowered)
+        or any(k in ("discount_amount", "threshold") for k in rejected_kinds)
+    ):
+        offer.is_coupon = True
 
     return offer
 

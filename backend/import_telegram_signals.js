@@ -147,11 +147,39 @@ function guessCategory(title) {
 // deger gercek magaza fiyati DEGIL, sadece mesajdaki yuzdeye dayali bir
 // tahmindir; urun tekrar yakalanip gercek fiyat degisimi gozlendiginde
 // (bkz. asagidaki priceChanged mantigi) gercek gozlemle degistirilir.
+// %85'ten buyuk bir "indirim" gercek bir urun indirimi degil, parse hatasidir
+// (ör. 1.000 TL'lik bir kupon tutarinin urun fiyati sanilmasi). parser.py ile
+// ayni esik.
+const MAX_PLAUSIBLE_DISCOUNT_PERCENT = 85;
+
 function impliedOldPrice(priceAmount, discountPercent) {
   if (priceAmount == null || discountPercent == null) return null;
-  if (discountPercent <= 0 || discountPercent >= 100) return null;
+  if (discountPercent <= 0 || discountPercent > MAX_PLAUSIBLE_DISCOUNT_PERCENT) return null;
   const old = priceAmount / (1 - discountPercent / 100);
   return Math.round(old * 100) / 100;
+}
+
+// Baslik bir URUN degil, kupon/kampanya duyurusu gibi mi? (ör. "Amazon 7.500
+// TL'ye 750 TL Indirim Kodu"). parser.py yeni mesajlarda bunlari zaten
+// eliyor; bu kontrol, parser duzeltilmeden once veritabanina girmis eski
+// kayitlari temizlemek (cleanup_v2) ve savunma amacli.
+function looksLikeCouponTitle(title) {
+  if (!title) return false;
+  // 'İ'/'I' sorunu: Turkce kucuk harfe cevir (İ->i, I->ı).
+  const t = title.replace(/İ/g, 'i').replace(/I/g, 'ı').toLowerCase();
+  return /indirim\s*(kodu|kuponu|kupon|çeki|ceki)|\bkupon|hediye\s*çeki|promosyon\s*kodu|kodu?\s+(ile|aktif|girin|kullan)|(ve\s+)?(üzeri|üstü|uzeri|ustu)\s+(alışveriş|alisveris|sipariş|siparis|sepet)|alışverişlerinizde|alisverislerinizde|alışverişinizde|alisverisinizde|ve\s+(üzerine|üstüne)\s|indirim\s*kodu/.test(
+    t
+  );
+}
+
+// Eski fiyat/guncel fiyat orani asiri ise (indirim > %80) veya fiyat "yuvarlak
+// kupon tutari" gibi gorunup indirim >= %70 ise fiyat guvenilmezdir.
+function suspiciousPriceReason(currentPrice, oldPrice) {
+  if (oldPrice == null || !(oldPrice > currentPrice) || !(currentPrice > 0)) return null;
+  const discount = ((oldPrice - currentPrice) / oldPrice) * 100;
+  if (discount >= 80) return 'implausible_discount';
+  if (discount >= 70 && (currentPrice < 20 || currentPrice % 50 === 0)) return 'round_coupon_like';
+  return null;
 }
 
 // Bu script periyodik calistirilmak uzere tasarlandi (ornegin bir cron ile
@@ -222,6 +250,57 @@ if (!cleanupDone) {
   }
 }
 
+// --- Bir kerelik temizlik v2: guvenilmez fiyatli / urun olmayan kayitlar -----
+// Eski parser.py, mesajdaki EN DUSUK tutari urun fiyati sayiyordu; bu yuzden
+// "Sepette 1.000 TL indirim" gibi kupon/indirim tutarlari fiyat oldu ve
+// 100.000 TL'lik bir telefon 1.000 TL (%99 indirim) gorundu; "7.500 TL'ye 750
+// TL indirim kodu" gibi kupon duyurulari da urun olarak kaydedildi. Bu
+// kayitlar uygulamada ozellikle "en yuksek indirim" siralamasinda ve "One
+// cikan" kartta en uste cikiyordu.
+//
+// Dogru fiyat bu kayitlarin hicbirinden guvenle geri kazanilamaz, bu yuzden
+// SILMIYORUZ -- sadece gizliyoruz (products.hidden = 1, sebep hidden_reason'da).
+// Ayni urun Telegram'da dogru (duzeltilmis parser ile) fiyatla tekrar
+// yakalaninca asagidaki ana dongu urunu otomatik tekrar gorunur yapar ve
+// bozuk fiyat gecmisini sifirlar. Yanlis bir gizleme olursa geri almak icin:
+//   UPDATE products SET hidden = 0, hidden_reason = NULL WHERE id = ...;
+const HIDE_SUSPICIOUS_CLEANUP_KEY = 'cleanup_v2_hide_suspicious_prices_done';
+const hideCleanupDone = backendDb
+  .prepare('SELECT value FROM import_state WHERE key = ?')
+  .get(HIDE_SUSPICIOUS_CLEANUP_KEY);
+if (!hideCleanupDone) {
+  const candidates = backendDb
+    .prepare(
+      `SELECT id, title, current_price, old_price FROM products
+       WHERE source = 'telegram' AND hidden = 0`
+    )
+    .all();
+  const hideStmt = backendDb.prepare(
+    'UPDATE products SET hidden = 1, hidden_reason = ? WHERE id = ?'
+  );
+  const reasonCounts = {};
+  backendDb.transaction(() => {
+    for (const p of candidates) {
+      const reason = looksLikeCouponTitle(p.title)
+        ? 'coupon_title'
+        : suspiciousPriceReason(p.current_price, p.old_price);
+      if (!reason) continue;
+      hideStmt.run(reason, p.id);
+      reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
+    }
+    backendDb
+      .prepare(
+        `INSERT INTO import_state (key, value) VALUES (?, '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+      )
+      .run(HIDE_SUSPICIOUS_CLEANUP_KEY);
+  })();
+  console.log(
+    `[cleanup_v2] ${candidates.length} Telegram urunu tarandi; gizlenenler: ` +
+      (Object.keys(reasonCounts).length ? JSON.stringify(reasonCounts) : 'yok')
+  );
+}
+
 const rows = tgDb
   .prepare(
     `SELECT id, channel, message_id, message_date, product_guess, price_amount,
@@ -259,6 +338,22 @@ const updateProduct = backendDb.prepare(`
 const insertHistory = backendDb.prepare(
   `INSERT INTO price_history (product_id, price, checked_at) VALUES (?, ?, ?)`
 );
+// cleanup_v2 ile gizlenmis bir urun, duzeltilmis parser ile gecerli bir fiyatla
+// tekrar yakalandiginda: bozuk fiyat gecmisini at, taze fiyatla yeniden baslat
+// ve urunu tekrar gorunur yap.
+const deleteHistory = backendDb.prepare('DELETE FROM price_history WHERE product_id = ?');
+const resetHiddenProduct = backendDb.prepare(`
+  UPDATE products SET
+    current_price = @current_price,
+    old_price = @old_price,
+    image_url = CASE WHEN @image_url IS NOT NULL THEN @image_url ELSE image_url END,
+    store_url = @store_url,
+    verified_at = @verified_at,
+    updated_at = @updated_at,
+    hidden = 0,
+    hidden_reason = NULL
+  WHERE id = @id
+`);
 
 // --- Push bildirimi hook noktalari --------------------------------------
 // Transaction TAMAMEN senkron olmak zorunda (better-sqlite3), bu yuzden
@@ -347,10 +442,19 @@ let created = 0;
 let updated = 0;
 let skipped = 0;
 let searchLinkCount = 0;
+let rejectedCoupon = 0;
+let rejectedOutlier = 0;
+let unhidden = 0;
 
 const runAll = backendDb.transaction(() => {
   for (const row of rows) {
     const title = row.product_guess.trim();
+
+    // Kupon/kampanya duyurusu urun degildir (savunma amacli; parser.py da eler).
+    if (looksLikeCouponTitle(title)) {
+      rejectedCoupon += 1;
+      continue;
+    }
 
     // Once gercek/tiklanabilir bir magaza linki dene; yoksa mesaj
     // metninde duz yazili bir magaza adi var mi diye bak (ornegin
@@ -368,7 +472,37 @@ const runAll = backendDb.transaction(() => {
     const existing = findExisting.get(storeInfo.store, title);
     const imageUrl = imageUrlFor(row.image_filename);
 
+    if (existing && existing.hidden === 1) {
+      // Gizli (guvenilmez fiyatli) urun: yeni mesaj makul bir fiyat tasiyorsa
+      // temiz bir baslangicla tekrar yayinla. Yeni fiyat ile eski (bozuk) fiyat
+      // arasinda karsilastirma yapmiyoruz -- eski fiyat zaten guvenilmezdi.
+      const implied = impliedOldPrice(row.price_amount, row.discount_percent);
+      if (suspiciousPriceReason(row.price_amount, implied)) {
+        rejectedOutlier += 1;
+        continue;
+      }
+      deleteHistory.run(existing.id);
+      resetHiddenProduct.run({
+        id: existing.id,
+        current_price: row.price_amount,
+        old_price: implied,
+        image_url: imageUrl,
+        store_url: storeInfo.url,
+        verified_at: nowIso(),
+        updated_at: nowIso(),
+      });
+      insertHistory.run(existing.id, row.price_amount, checkedAt);
+      unhidden += 1;
+      continue;
+    }
+
     if (existing) {
+      // Asiri dusuk fiyat = buyuk olasilikla yine bir kupon/taksit/birim fiyat
+      // parse hatasi. Bilinen fiyatin %20'sinin altina duserse kabul etme.
+      if (row.price_amount < existing.current_price * 0.2) {
+        rejectedOutlier += 1;
+        continue;
+      }
       const priceChanged = existing.current_price !== row.price_amount;
       // Fiyat degistiyse eski fiyati "old_price" referansi olarak sakla,
       // yeni fiyati guncelle ve gecmise bir nokta ekle. Fiyat ayniysa
@@ -394,6 +528,11 @@ const runAll = backendDb.transaction(() => {
       }
       updated += 1;
     } else {
+      // Yeni urun: mesajdaki yuzdeden turetilen indirim bile guvenilmezse ekleme.
+      if (suspiciousPriceReason(row.price_amount, impliedOldPrice(row.price_amount, row.discount_percent))) {
+        rejectedOutlier += 1;
+        continue;
+      }
       const info = insertProduct.run({
         title,
         category,
@@ -426,6 +565,12 @@ const runAll = backendDb.transaction(() => {
 runAll();
 
 console.log(`[import] Tamam. Yeni: ${created}, guncellenen: ${updated}, atlanan (magaza taninamadi): ${skipped}`);
+if (rejectedCoupon + rejectedOutlier + unhidden > 0) {
+  console.log(
+    `[import] Fiyat korumasi: kupon basligi reddedilen: ${rejectedCoupon}, ` +
+      `supheli/asiri dusuk fiyat reddedilen: ${rejectedOutlier}, tekrar gorunur yapilan: ${unhidden}`
+  );
+}
 if (searchLinkCount > 0) {
   console.log(
     `[import] Not: ${searchLinkCount} urunde mesajda tiklanabilir link yoktu -- ` +

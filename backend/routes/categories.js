@@ -20,6 +20,7 @@ router.get('/', (req, res) => {
     .prepare(
       `SELECT category, COUNT(*) AS count
        FROM products
+       WHERE hidden = 0
        GROUP BY category
        ORDER BY count DESC`
     )

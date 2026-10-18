@@ -19,7 +19,9 @@ const SORTS = {
 router.get('/', (req, res) => {
   const { category, store, sort = 'discount', limit = '30', q } = req.query;
 
-  const where = [];
+  // hidden = 1: fiyati guvenilmez bulunup gizlenen urunler (bkz. db.js
+  // products.hidden / import_telegram_signals.js cleanup_v2).
+  const where = ['hidden = 0'];
   const params = {};
   if (category && category !== 'all') {
     where.push('category = @category');
@@ -42,7 +44,9 @@ router.get('/', (req, res) => {
     .prepare(`SELECT * FROM products ${whereSql} ORDER BY ${orderBy} LIMIT ${lim}`)
     .all(params);
 
-  const { count: totalScanned } = db.prepare('SELECT COUNT(*) AS count FROM products').get();
+  const { count: totalScanned } = db
+    .prepare('SELECT COUNT(*) AS count FROM products WHERE hidden = 0')
+    .get();
 
   res.json({
     deals: rows.map((r) => toDealSummary(db, r)),
@@ -55,7 +59,8 @@ router.get('/flash', (req, res) => {
   const row = db
     .prepare(
       `SELECT * FROM products
-       WHERE is_flash_deal = 1 AND (flash_deal_ends_at IS NULL OR flash_deal_ends_at > datetime('now'))
+       WHERE hidden = 0 AND is_flash_deal = 1
+         AND (flash_deal_ends_at IS NULL OR flash_deal_ends_at > datetime('now'))
        ORDER BY flash_deal_ends_at ASC LIMIT 1`
     )
     .get();
@@ -68,7 +73,7 @@ router.get('/featured', (req, res) => {
   const row = db
     .prepare(
       `SELECT * FROM products
-       WHERE old_price IS NOT NULL AND old_price > current_price
+       WHERE hidden = 0 AND old_price IS NOT NULL AND old_price > current_price
        ORDER BY (old_price - current_price) * 1.0 / old_price DESC
        LIMIT 1`
     )

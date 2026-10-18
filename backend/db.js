@@ -153,6 +153,23 @@ if (!usersColumns.includes('apple_id')) {
 }
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_apple_id ON users(apple_id)');
 
+// --- Migration: products.hidden / hidden_reason -------------------------
+// Fiyati/eski fiyati guvenilmez gorunen urunler (kupon duyurusu, "indirim
+// tutari"nin fiyat sanilmasi vb. -- bkz. import_telegram_signals.js
+// cleanup_v2) SILINMEZ, sadece listelerde gizlenir (hidden = 1). Boylece
+// hata yapilirsa geri alinabilir (UPDATE products SET hidden = 0 ...) ve bu
+// urunlere bagli alarmlar/fiyat gecmisi kaybolmaz. Ayni urun Telegram'da
+// dogru fiyatla tekrar yakalandiginda import script'i otomatik olarak
+// tekrar gorunur yapar.
+const productsColumns = db.prepare('PRAGMA table_info(products)').all().map((c) => c.name);
+if (!productsColumns.includes('hidden')) {
+  db.exec('ALTER TABLE products ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
+}
+if (!productsColumns.includes('hidden_reason')) {
+  db.exec('ALTER TABLE products ADD COLUMN hidden_reason TEXT');
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_products_hidden ON products(hidden)');
+
 // --- Migration: bozuk "localhost" gorsel URL'lerini onar ----------------
 // BACKEND_PUBLIC_URL Render'da hic ayarlanmamisti, bu yuzden
 // import_telegram_signals.js bir sure "http://localhost:<port>/..." gibi --

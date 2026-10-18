@@ -15,7 +15,7 @@ router.get('/', (req, res) => {
   }
 
   const matches = db
-    .prepare('SELECT * FROM products WHERE title LIKE ? ORDER BY current_price ASC')
+    .prepare('SELECT * FROM products WHERE hidden = 0 AND title LIKE ? ORDER BY current_price ASC')
     .all(`%${q}%`);
 
   if (matches.length === 0) {
@@ -29,7 +29,7 @@ router.get('/', (req, res) => {
   if (primaryRow.group_slug) {
     comparisonRows = db
       .prepare(
-        `SELECT * FROM products WHERE group_slug = ? AND id != ? ORDER BY current_price ASC`
+        `SELECT * FROM products WHERE hidden = 0 AND group_slug = ? AND id != ? ORDER BY current_price ASC`
       )
       .all(primaryRow.group_slug, primaryRow.id);
   } else {

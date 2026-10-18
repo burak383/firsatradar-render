@@ -268,6 +268,63 @@ const ACCOUNT_DELETION_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
+// -----------------------------------------------------------------------
+// Destek sayfasi. App Store Connect ("Support URL") ve Play Console'un
+// bazi bolumleri, giris gerektirmeyen HERKESE ACIK bir destek sayfasi
+// istiyor -- sadece bir "mailto:" linki bu alan icin yeterli/gecerli
+// sayilmiyor. Basit bir SSS + iletisim sayfasi.
+const SUPPORT_HTML = `<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FırsatRadar — Destek</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; padding: 0;
+    background: #0B0F17; color: #F4F7FB;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    line-height: 1.65;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 40px 20px 80px; }
+  h1 { font-size: 26px; margin-bottom: 4px; }
+  .updated { color: #9AA8BB; font-size: 13px; margin-bottom: 32px; }
+  h2 { font-size: 18px; margin-top: 32px; color: #FF6B00; }
+  p, li { color: #E8EDF5; font-size: 15px; }
+  a { color: #3BB9FF; }
+  .contact {
+    margin-top: 40px; padding: 16px 18px; border-radius: 12px;
+    background: #111925; border: 1px solid #263247;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>FırsatRadar — Destek</h1>
+  <p class="updated">Türkiye'deki mağazalardan (Trendyol, Hepsiburada, Amazon, N11 ve diğerleri) indirim ve fırsatları takip eden uygulama.</p>
+
+  <h2>Sıkça sorulan sorular</h2>
+  <p><strong>Fiyatlar neden mağazadakinden farklı görünebilir?</strong><br />
+  Fırsatlar, kanallardan otomatik olarak toplanır ve mağaza fiyatları zaman zaman değişebilir. Güncel/kesin fiyat ve stok durumu için "İncele" bağlantısıyla mağaza sayfasına gidin.</p>
+
+  <p><strong>Fiyat alarmı nasıl çalışır?</strong><br />
+  Bir üründe hedef fiyat belirlediğinizde, ürünün fiyatı o seviyeye indiğinde size bildirim gönderilir.</p>
+
+  <p><strong>Hesabımı ve verilerimi nasıl silerim?</strong><br />
+  <a href="/hesap-silme">Bu sayfadan</a> kendiniz silebilir ya da aşağıdaki adresten bize ulaşabilirsiniz.</p>
+
+  <p><strong>Bir sorun bildirmek veya öneri iletmek istiyorum.</strong><br />
+  Aşağıdaki e-posta adresinden bize yazabilirsiniz, mümkün olan en kısa sürede döneriz.</p>
+
+  <div class="contact">
+    <strong>İletişim:</strong><br />
+    <a href="mailto:seolen8@gmail.com">seolen8@gmail.com</a>
+  </div>
+</main>
+</body>
+</html>`;
+
 function renderPrivacyPolicy(req, res) {
   res.type('html').send(PRIVACY_HTML);
 }
@@ -276,4 +333,8 @@ function renderAccountDeletionPage(req, res) {
   res.type('html').send(ACCOUNT_DELETION_HTML);
 }
 
-module.exports = { renderPrivacyPolicy, renderAccountDeletionPage };
+function renderSupportPage(req, res) {
+  res.type('html').send(SUPPORT_HTML);
+}
+
+module.exports = { renderPrivacyPolicy, renderAccountDeletionPage, renderSupportPage };
