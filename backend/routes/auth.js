@@ -14,6 +14,43 @@ const { getJwtSecret } = require('../authSecret');
 
 const router = express.Router();
 
+// Express 4, async handler'larda firlatilan hatalari (ornegin veritabani
+// "disk is full") YAKALAMAZ: istek sonsuza dek yanit almadan asili kalir ve
+// uygulama "yanit vermiyor" gibi gorunur (App Review 2.1(a): Apple ile giris
+// "non-responsive"). Bu sarmalayici hatayi yakalayip duzgun bir 500 yaniti
+// dondurur.
+const wrap = (handler) => (req, res) => {
+  Promise.resolve(handler(req, res)).catch((e) => {
+    console.error(`[auth] ${req.method} ${req.originalUrl} hata:`, e);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Sunucuda geçici bir sorun oluştu, lütfen tekrar dene.' });
+    }
+  });
+};
+
+// Authorization: Bearer <token> zorunlu (authMiddleware.js'teki opsiyonel
+// auth'tan farkli: gecersizse 401 doner).
+function requireUser(req, res) {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : null;
+  if (!token) {
+    res.status(401).json({ error: 'Giriş yapılmamış.' });
+    return null;
+  }
+  try {
+    const payload = jwt.verify(token, getJwtSecret());
+    const row = db.prepare('SELECT * FROM users WHERE id = ?').get(payload.sub);
+    if (!row) {
+      res.status(401).json({ error: 'Hesap bulunamadı.' });
+      return null;
+    }
+    return row;
+  } catch {
+    res.status(401).json({ error: 'Oturum geçersiz veya süresi dolmuş.' });
+    return null;
+  }
+}
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const TOKEN_TTL = '30d';
 const PASSWORD_HASH_ROUNDS = 10;
@@ -49,7 +86,7 @@ function claimDeviceAlarms(userId, deviceId) {
 }
 
 // POST /api/auth/register { email, password, deviceId? }
-router.post('/register', async (req, res) => {
+router.post('/register', wrap(async (req, res) => {
   const email = normalizeEmail(req.body?.email);
   const password = (req.body?.password || '').toString();
   const deviceId = req.body?.deviceId;
@@ -75,10 +112,10 @@ router.post('/register', async (req, res) => {
   claimDeviceAlarms(user.id, deviceId);
 
   res.status(201).json({ token: issueToken(user), user: toPublicUser(user) });
-});
+}));
 
 // POST /api/auth/login { email, password, deviceId? }
-router.post('/login', async (req, res) => {
+router.post('/login', wrap(async (req, res) => {
   const email = normalizeEmail(req.body?.email);
   const password = (req.body?.password || '').toString();
   const deviceId = req.body?.deviceId;
@@ -95,7 +132,7 @@ router.post('/login', async (req, res) => {
   claimDeviceAlarms(row.id, deviceId);
 
   res.json({ token: issueToken(row), user: toPublicUser(row) });
-});
+}));
 
 // POST /api/auth/apple { identityToken, fullName?, deviceId? }
 // -----------------------------------------------------------------------
@@ -111,7 +148,7 @@ router.post('/login', async (req, res) => {
 // girişte gelir (Apple'in "Hide My Email" ozelligiyle bir relay adresi de
 // olabilir, sorun degil -- normal bir e-posta gibi calisir); ayni e-postayla
 // daha once e-posta/sifre hesabi acilmissa Apple girisini o hesaba baglariz.
-router.post('/apple', async (req, res) => {
+router.post('/apple', wrap(async (req, res) => {
   const identityToken = (req.body?.identityToken || '').toString();
   const deviceId = req.body?.deviceId;
 
@@ -163,7 +200,7 @@ router.post('/apple', async (req, res) => {
   claimDeviceAlarms(row.id, deviceId);
 
   res.json({ token: issueToken(row), user: toPublicUser(row) });
-});
+}));
 
 // GET /api/auth/me -- Authorization: Bearer <token>
 router.get('/me', (req, res) => {
@@ -192,7 +229,7 @@ router.get('/me', (req, res) => {
 //
 // Silme GERCEK ve KALICI: hesap ve o hesaba bagli TUM fiyat alarmlari
 // veritabanindan tamamen kaldirilir, hicbir yedek/arsiv tutulmaz.
-router.post('/delete-account', async (req, res) => {
+router.post('/delete-account', wrap(async (req, res) => {
   const email = normalizeEmail(req.body?.email);
   const password = (req.body?.password || '').toString();
 
@@ -213,6 +250,27 @@ router.post('/delete-account', async (req, res) => {
   })();
 
   res.json({ ok: true });
-});
+}));
+
+// DELETE /api/auth/account  (Authorization: Bearer <token>)
+// -----------------------------------------------------------------------
+// Uygulama ICINDEN hesap silme (App Store 5.1.1(v)). Kimlik dogrulamasi JWT
+// ile yapilir -- Apple ile giris yapan hesaplarin bilinen bir sifresi yoktur,
+// bu yuzden sifre istemiyoruz; onay adimi uygulamadaki uyari penceresidir.
+// Hesaba bagli HER sey kalici olarak silinir: alarmlar, tercihler, push
+// jetonlari ve kullanici kaydi.
+router.delete('/account', wrap(async (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
+
+  db.transaction(() => {
+    db.prepare('DELETE FROM alarms WHERE user_id = ?').run(user.id);
+    db.prepare('DELETE FROM user_preferences WHERE user_id = ?').run(user.id);
+    db.prepare('DELETE FROM push_tokens WHERE user_id = ?').run(user.id);
+    db.prepare('DELETE FROM users WHERE id = ?').run(user.id);
+  })();
+
+  res.json({ ok: true });
+}));
 
 module.exports = router;
