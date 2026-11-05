@@ -22,7 +22,7 @@
 // kaybolmaz.
 
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const DATA_DIR = process.env.RENDER_DISK_PATH || '/data';
 const IMPORT_INTERVAL_MS = Number(process.env.IMPORT_INTERVAL_MS || 5 * 60 * 1000);
@@ -43,6 +43,20 @@ require('./backend/server.js');
 
 // --- 2) Telegram listener'i alt surec olarak baslat ---------------------
 const TELEGRAM_DB_PATH = path.join(DATA_DIR, 'messages.db');
+
+// Disk temizligi (bkz. backend/disk_cleanup.js): eski gorselleri ve ham
+// mesajlari siler. Kalici disk dolunca listener mesaj kaydedemiyor ve urunler
+// yenilenmiyor. Listener baslamadan ONCE bir kez, sonra her import turundan once.
+function runDiskCleanupSync() {
+  const r = spawnSync('node', ['disk_cleanup.js', TELEGRAM_DB_PATH], {
+    cwd: path.join(__dirname, 'backend'),
+    env: { ...process.env },
+    stdio: 'inherit',
+    timeout: 120000,
+  });
+  if (r.status !== 0) log(`Disk temizligi basarisiz bitti (kod=${r.status})`);
+}
+runDiskCleanupSync();
 const listenerEnv = {
   ...process.env,
   DB_PATH: TELEGRAM_DB_PATH,
@@ -75,6 +89,7 @@ startListener();
 
 // --- 3) Import'u periyodik calistir -------------------------------------
 function runImportOnce() {
+  runDiskCleanupSync();
   log('Telegram -> backend import calisiyor...');
   const proc = spawn('node', ['import_telegram_signals.js', TELEGRAM_DB_PATH], {
     cwd: path.join(__dirname, 'backend'),

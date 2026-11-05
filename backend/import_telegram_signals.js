@@ -442,6 +442,10 @@ let created = 0;
 let updated = 0;
 let skipped = 0;
 let searchLinkCount = 0;
+// Cok eski mesajlar (listener'in periyodik "son 30 mesaj" taramasi ham mesaj
+// temizligi sonrasi onlari yeniden ekleyebilir) urun olarak geri gelmesin.
+const MAX_MESSAGE_AGE_HOURS = Number(process.env.STALE_PRODUCT_HOURS || 24);
+let rejectedOld = 0;
 let rejectedCoupon = 0;
 let rejectedOutlier = 0;
 let unhidden = 0;
@@ -449,6 +453,14 @@ let unhidden = 0;
 const runAll = backendDb.transaction(() => {
   for (const row of rows) {
     const title = row.product_guess.trim();
+
+    if (row.message_date) {
+      const ageMs = Date.now() - Date.parse(row.message_date);
+      if (Number.isFinite(ageMs) && ageMs > MAX_MESSAGE_AGE_HOURS * 3600 * 1000) {
+        rejectedOld += 1;
+        continue;
+      }
+    }
 
     // Kupon/kampanya duyurusu urun degildir (savunma amacli; parser.py da eler).
     if (looksLikeCouponTitle(title)) {
@@ -565,9 +577,9 @@ const runAll = backendDb.transaction(() => {
 runAll();
 
 console.log(`[import] Tamam. Yeni: ${created}, guncellenen: ${updated}, atlanan (magaza taninamadi): ${skipped}`);
-if (rejectedCoupon + rejectedOutlier + unhidden > 0) {
+if (rejectedOld + rejectedCoupon + rejectedOutlier + unhidden > 0) {
   console.log(
-    `[import] Fiyat korumasi: kupon basligi reddedilen: ${rejectedCoupon}, ` +
+    `[import] Fiyat korumasi: cok eski mesaj: ${rejectedOld}, kupon basligi reddedilen: ${rejectedCoupon}, ` +
       `supheli/asiri dusuk fiyat reddedilen: ${rejectedOutlier}, tekrar gorunur yapilan: ${unhidden}`
   );
 }
