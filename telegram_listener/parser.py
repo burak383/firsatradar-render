@@ -295,7 +295,13 @@ def parse_message(text: str) -> ParsedOffer:
             if has_currency:
                 rejected_kinds.append(kind)
             continue
-        if not has_currency and (amount < 1 or amount > 999999):
+        # "0 TL", "0,00 TL" ("Kargo 0 TL", "ucretsiz") gibi sifir/kurus altindaki
+        # tutarlar urun fiyati degildir. Para birimli eslesmeler arasindan EN
+        # DUSUK olan secildigi icin bunlar eskiden fiyat olarak seciliyor ve
+        # uygulamada "0 TL" urunler olusuyordu.
+        if amount < 1:
+            continue
+        if not has_currency and amount > 999999:
             continue
         if not has_currency and amount == int(amount) and len(m.group("amount")) == 4:
             # 2024, 2026 gibi yil olabilecek 4 haneli, para birimsiz sayilari atla

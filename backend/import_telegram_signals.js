@@ -317,6 +317,23 @@ if (!fakeCleanupDone) {
   console.log(`[cleanup_v3] ${info.changes} urunun sahte (kampanya yuzdesinden turetilmis) eski fiyati sifirlandi.`);
 }
 
+// --- Temizlik v4: 0 TL (veya 1 TL altindaki) fiyatli urunleri gizle ---------
+// "Kargo 0 TL" gibi sifir tutarlar eski parser'da urun fiyati seciliyordu.
+// Bu kontrol ucuz oldugu icin her calismada tekrar uygulanir (yeni giren
+// bozuk kayit kalmasin diye); geri almak icin hidden_reason = 'zero_price'
+// olanlar hidden = 0 yapilabilir.
+{
+  const zeroInfo = backendDb
+    .prepare(
+      `UPDATE products SET hidden = 1, hidden_reason = 'zero_price'
+       WHERE hidden = 0 AND current_price < 1`
+    )
+    .run();
+  if (zeroInfo.changes > 0) {
+    console.log(`[cleanup_v4] ${zeroInfo.changes} urun 0 TL fiyat nedeniyle gizlendi.`);
+  }
+}
+
 // --- Bir kerelik temizlik v2: guvenilmez fiyatli / urun olmayan kayitlar -----
 // Eski parser.py, mesajdaki EN DUSUK tutari urun fiyati sayiyordu; bu yuzden
 // "Sepette 1.000 TL indirim" gibi kupon/indirim tutarlari fiyat oldu ve
@@ -375,6 +392,7 @@ const rows = tgDb
      FROM raw_messages
      WHERE id > ? AND looks_like_offer = 1
        AND product_guess IS NOT NULL AND price_amount IS NOT NULL
+       AND price_amount >= 1
      ORDER BY id ASC`
   )
   .all(lastId);
