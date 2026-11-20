@@ -68,16 +68,43 @@ router.get('/flash', (req, res) => {
   res.json({ deal: toDealDetail(db, row) });
 });
 
-// GET /api/deals/featured -> en yuksek indirimli tek urun (KeFet'teki "one buyuk kart")
-router.get('/featured', (req, res) => {
-  const row = db
+// GET /api/deals/featured -> KeFet'teki "Öne çıkan fırsatlar" buyuk karti.
+// Eskiden "tum zamanlarin en yuksek indirimli urunu"nu donduruyordu; yeni
+// urun gelse bile ayni kart gunlerce degismiyordu. Simdi:
+//  - sadece son FEATURED_MAX_AGE_HOURS saat icinde guncellenen/eklenen
+//    urunlerden secilir (yoksa pencere 3 gun, sonra tum zamanlar olarak genisler),
+//  - %80'in ustundeki indirimler supheli sayilip vitrine alinmaz (parser
+//    hatasi kaynakli sahte indirimler),
+//  - en iyi FEATURED_POOL_SIZE aday arasindan SAATE gore doner: her saat
+//    basi bir sonraki aday vitrine cikar.
+const FEATURED_MAX_AGE_HOURS = Number(process.env.FEATURED_MAX_AGE_HOURS || 24);
+const FEATURED_POOL_SIZE = Number(process.env.FEATURED_POOL_SIZE || 8);
+const FEATURED_MAX_DISCOUNT = 0.8;
+
+function pickFeatured(maxAgeHours) {
+  const ageSql =
+    maxAgeHours == null
+      ? ''
+      : `AND julianday(MAX(created_at, updated_at)) > julianday('now', '-${Number(maxAgeHours)} hours')`;
+  const rows = db
     .prepare(
       `SELECT * FROM products
        WHERE hidden = 0 AND old_price IS NOT NULL AND old_price > current_price
+         AND (old_price - current_price) * 1.0 / old_price <= ${FEATURED_MAX_DISCOUNT}
+         AND (old_price - current_price) * 1.0 / old_price >= 0.1
+         ${ageSql}
        ORDER BY (old_price - current_price) * 1.0 / old_price DESC
-       LIMIT 1`
+       LIMIT ${FEATURED_POOL_SIZE}`
     )
-    .get();
+    .all();
+  if (!rows.length) return null;
+  const hourBucket = Math.floor(Date.now() / 3600000);
+  return rows[hourBucket % rows.length];
+}
+
+router.get('/featured', (req, res) => {
+  const row =
+    pickFeatured(FEATURED_MAX_AGE_HOURS) || pickFeatured(72) || pickFeatured(null);
   if (!row) return res.json({ deal: null });
   res.json({ deal: toDealDetail(db, row) });
 });
