@@ -159,6 +159,41 @@ function impliedOldPrice(priceAmount, discountPercent) {
   return Math.round(old * 100) / 100;
 }
 
+// Mesajdaki yuzde bu urune ait GERCEK bir indirim degilse null doner.
+// Eskiden mesajdaki ilk "%NN" dogrudan indirim sayiliyor ve fiyattan geriye
+// dogru sahte bir "eski fiyat" uretiliyordu (ör. 3.849 TL + "%85'e varan
+// indirim" -> 25.660 TL "eski fiyat", -%85 rozeti). Guvenilmez durumlar:
+//  1) "%85'e varan", "%70'e kadar" gibi AZAMI kampanya iddialari: bu oran
+//     urunun kendi indirimi degil, kampanyadaki en yuksek orandir.
+//  2) Birden cok urun iceren mesajlar ("1️⃣ ... 2️⃣ ...", "2. ÜRÜN"): tek bir
+//     yuzde hangi urune ait belli degil.
+//  3) %70'in ustu: tek bir mesaj yuzdesine dayanan tahmin icin fazla uc;
+//     gercek bir fiyat gozlemi (2. fiyat noktasi) olmadan rozet gostermiyoruz.
+const MAX_IMPLIED_DISCOUNT_PERCENT = 70;
+
+function trustedDiscountPercent(row) {
+  const pct = row.discount_percent;
+  if (pct == null || pct <= 0 || pct > MAX_IMPLIED_DISCOUNT_PERCENT) return null;
+  const text = String(row.raw_text || '');
+  const lower = text.replace(/İ/g, 'i').replace(/I/g, 'ı').toLowerCase();
+
+  // (1) "%85'e varan", "%85 e varan", "%70'e kadar", "yüzde 70'e varan"
+  const maxClaim = new RegExp(
+    `(?:%|yüzde|yuzde)\\s*${pct}\\s*['’]?\\s*(?:e|a|ye|ya)?\\s*(?:varan|kadar|varıyor|variyor)`
+  );
+  if (maxClaim.test(lower)) return null;
+  // Metinde yuzdeden hemen sonra "varan/kadar" gelen herhangi bir ifade de
+  // (parser baska bir yuzdeyi almis olabilir) kampanya iddiasidir.
+  if (/%\s*\d{1,3}\s*['’]?\s*(?:e|a|ye|ya)?\s*(?:varan|kadar)/.test(lower)) return null;
+
+  // (2) Coklu urun mesaji
+  const keycaps = (text.match(/[0-9]\uFE0F?\u20E3/g) || []).length;
+  if (keycaps >= 2) return null;
+  if (/(?:^|\n)\s*2[.)]\s*ürün|2\.\s*ürün|ürün\s*2\b/.test(lower)) return null;
+
+  return pct;
+}
+
 // Baslik bir URUN degil, kupon/kampanya duyurusu gibi mi? (ör. "Amazon 7.500
 // TL'ye 750 TL Indirim Kodu"). parser.py yeni mesajlarda bunlari zaten
 // eliyor; bu kontrol, parser duzeltilmeden once veritabanina girmis eski
@@ -248,6 +283,38 @@ if (!cleanupDone) {
         've eski parser hatasindan sisirilmis olabilecek "eski fiyat"i sifirlandi.'
     );
   }
+}
+
+// --- Bir kerelik temizlik v3: "%NN'e varan" gibi kampanya yuzdelerinden
+// uretilmis sahte "eski fiyat"lar ---------------------------------------------
+// Onceki surum mesajdaki ilk yuzdeyi (ör. "%85'e varan indirim") urunun kendi
+// indirimi sanip fiyattan geriye dogru uydurma bir eski fiyat uretiyordu.
+// Fiyat gecmisinde TEK nokta olan (gercek bir fiyat degisimi hic gozlenmemis)
+// Telegram urunlerinde %50 ve ustu indirim gosteren old_price MUTLAKA bu
+// tahmindir; sifirliyoruz. Urun yeni (duzeltilmis) mantikla tekrar
+// goruldugunde gerekirse dogru sekilde yeniden olusur.
+const FAKE_IMPLIED_CLEANUP_KEY = 'cleanup_v3_campaign_percent_implied_old_price_done';
+const fakeCleanupDone = backendDb
+  .prepare('SELECT value FROM import_state WHERE key = ?')
+  .get(FAKE_IMPLIED_CLEANUP_KEY);
+if (!fakeCleanupDone) {
+  const info = backendDb
+    .prepare(
+      `UPDATE products SET old_price = NULL
+       WHERE source = 'telegram' AND old_price IS NOT NULL AND old_price > current_price
+         AND (old_price - current_price) * 1.0 / old_price >= 0.5
+         AND id IN (
+           SELECT product_id FROM price_history GROUP BY product_id HAVING COUNT(*) = 1
+         )`
+    )
+    .run();
+  backendDb
+    .prepare(
+      `INSERT INTO import_state (key, value) VALUES (?, '1')
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+    )
+    .run(FAKE_IMPLIED_CLEANUP_KEY);
+  console.log(`[cleanup_v3] ${info.changes} urunun sahte (kampanya yuzdesinden turetilmis) eski fiyati sifirlandi.`);
 }
 
 // --- Bir kerelik temizlik v2: guvenilmez fiyatli / urun olmayan kayitlar -----
@@ -488,7 +555,7 @@ const runAll = backendDb.transaction(() => {
       // Gizli (guvenilmez fiyatli) urun: yeni mesaj makul bir fiyat tasiyorsa
       // temiz bir baslangicla tekrar yayinla. Yeni fiyat ile eski (bozuk) fiyat
       // arasinda karsilastirma yapmiyoruz -- eski fiyat zaten guvenilmezdi.
-      const implied = impliedOldPrice(row.price_amount, row.discount_percent);
+      const implied = impliedOldPrice(row.price_amount, trustedDiscountPercent(row));
       if (suspiciousPriceReason(row.price_amount, implied)) {
         rejectedOutlier += 1;
         continue;
@@ -527,7 +594,7 @@ const runAll = backendDb.transaction(() => {
           // Fiyat degismedi ama hala eski fiyatimiz yoksa, bu mesajdaki
           // indirim yuzdesinden bir tahmin dolduralim (varsa).
           : existing.old_price == null
-          ? impliedOldPrice(row.price_amount, row.discount_percent)
+          ? impliedOldPrice(row.price_amount, trustedDiscountPercent(row))
           : null,
         image_url: imageUrl,
         store_url: storeInfo.url,
@@ -541,7 +608,7 @@ const runAll = backendDb.transaction(() => {
       updated += 1;
     } else {
       // Yeni urun: mesajdaki yuzdeden turetilen indirim bile guvenilmezse ekleme.
-      if (suspiciousPriceReason(row.price_amount, impliedOldPrice(row.price_amount, row.discount_percent))) {
+      if (suspiciousPriceReason(row.price_amount, impliedOldPrice(row.price_amount, trustedDiscountPercent(row)))) {
         rejectedOutlier += 1;
         continue;
       }
@@ -552,7 +619,7 @@ const runAll = backendDb.transaction(() => {
         store_url: storeInfo.url,
         image_url: imageUrl,
         current_price: row.price_amount,
-        old_price: impliedOldPrice(row.price_amount, row.discount_percent),
+        old_price: impliedOldPrice(row.price_amount, trustedDiscountPercent(row)),
         verified_at: nowIso(),
         created_at: nowIso(),
         updated_at: nowIso(),
