@@ -15,9 +15,51 @@ const SORTS = {
   followers: 'follow_count DESC',
 };
 
-// GET /api/deals?category=&store=&sort=&limit=&q=
+const FRESH_MAX_AGE_HOURS = Number(process.env.FEATURED_MAX_AGE_HOURS || 24);
+const FRESH_POOL_SIZE = Number(process.env.FRESH_POOL_SIZE || 24);
+const FRESH_STEP = Number(process.env.FRESH_STEP || 2);
+
+// Yeni (son N saat), makul indirimli (%10-%80) urunlerden olusan bir havuz
+// kurar ve her saat havuzda FRESH_STEP kadar ilerleyerek `lim` urun dondurur.
+// Boylece iki kucuk kart saatte bir yeni urunlerle degisir. Havuz bossa 3 gune,
+// o da bossa yas sinirsiz genisler.
+function pickFreshRotation(baseWhere, params, lim) {
+  const discountExpr = '(old_price - current_price) * 1.0 / old_price';
+  const build = (maxAgeHours) => {
+    const w = [
+      ...baseWhere,
+      'old_price IS NOT NULL',
+      'old_price > current_price',
+      `${discountExpr} <= 0.8`,
+      `${discountExpr} >= 0.1`,
+    ];
+    if (maxAgeHours != null) {
+      w.push(
+        `julianday(MAX(created_at, updated_at)) > julianday('now', '-${Number(maxAgeHours)} hours')`
+      );
+    }
+    return db
+      .prepare(
+        `SELECT * FROM products WHERE ${w.join(' AND ')}
+         ORDER BY ${discountExpr} DESC LIMIT ${FRESH_POOL_SIZE}`
+      )
+      .all(params);
+  };
+  let pool = build(FRESH_MAX_AGE_HOURS);
+  if (!pool.length) pool = build(72);
+  if (!pool.length) pool = build(null);
+  if (!pool.length) return [];
+  const hourBucket = Math.floor(Date.now() / 3600000);
+  const start = (hourBucket * FRESH_STEP) % pool.length;
+  const count = Math.min(lim, pool.length);
+  const out = [];
+  for (let i = 0; i < count; i += 1) out.push(pool[(start + i) % pool.length]);
+  return out;
+}
+
+// GET /api/deals?category=&store=&sort=&limit=&q=&fresh=1
 router.get('/', (req, res) => {
-  const { category, store, sort = 'discount', limit = '30', q } = req.query;
+  const { category, store, sort = 'discount', limit = '30', q, fresh } = req.query;
 
   // hidden = 1: fiyati guvenilmez bulunup gizlenen urunler (bkz. db.js
   // products.hidden / import_telegram_signals.js cleanup_v2).
@@ -40,9 +82,16 @@ router.get('/', (req, res) => {
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const lim = Math.min(parseInt(limit, 10) || 30, 100);
 
-  const rows = db
-    .prepare(`SELECT * FROM products ${whereSql} ORDER BY ${orderBy} LIMIT ${lim}`)
-    .all(params);
+  let rows;
+  if (fresh === '1' && (sort === 'discount' || !SORTS[sort])) {
+    // KeFet'te buyuk "One cikan" kartin altindaki iki urun: sadece yeni
+    // urunlerden, saatte bir donen secki (bkz. pickFreshRotation).
+    rows = pickFreshRotation(where, params, lim);
+  } else {
+    rows = db
+      .prepare(`SELECT * FROM products ${whereSql} ORDER BY ${orderBy} LIMIT ${lim}`)
+      .all(params);
+  }
 
   const { count: totalScanned } = db
     .prepare('SELECT COUNT(*) AS count FROM products WHERE hidden = 0')
