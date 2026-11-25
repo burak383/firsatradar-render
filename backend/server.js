@@ -20,6 +20,52 @@ app.use(express.json());
 
 app.get('/api/health', (req, res) => res.json({ ok: true, service: 'firsatradar-backend' }));
 
+// AdMob uygulama dogrulamasi (app-ads.txt): dosya, Google Play'deki "gelistirici
+// web sitesi" alaninda yazan alan adinin KOKUNDE yayinlanmali. Icerik AdMob
+// konsolunun verdigi satirin aynisidir.
+app.get('/app-ads.txt', (req, res) => {
+  res
+    .type('text/plain; charset=utf-8')
+    .set('Cache-Control', 'public, max-age=3600')
+    .send('google.com, pub-9017194698663463, DIRECT, f08c47fec0942fa0\n');
+});
+
+// Gelistirici web sitesi olarak gosterilen basit acilis sayfasi (Play Store ve
+// AdMob "gelistirici web sitesi" alani). Giris gerektirmez.
+const PLAY_URL = 'https://play.google.com/store/apps/details?id=com.firsatradar.app';
+app.get('/', (req, res) => {
+  res.type('html').send(`<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FırsatRadar: İndirim Takibi</title>
+<meta name="description" content="Fiyat alarmı, fiyat geçmişi ve günün indirimleri tek yerde. Fırsatı kaçırma.">
+<style>
+  body{margin:0;background:#0B0F17;color:#F4F7FB;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.6}
+  main{max-width:640px;margin:0 auto;padding:48px 20px}
+  h1{font-size:32px;margin:0 0 8px}
+  p{color:#9AA8BB}
+  a.btn{display:inline-block;margin:16px 0;padding:14px 22px;background:#FF6B00;color:#0B0F17;font-weight:700;border-radius:14px;text-decoration:none}
+  nav a{color:#72F3A1;margin-right:16px}
+</style>
+</head>
+<body>
+<main>
+  <h1>FırsatRadar</h1>
+  <p>Trendyol, Hepsiburada, N11, Amazon ve Çiçeksepeti gibi mağazalardaki indirimleri tek yerde gör, fiyat geçmişine bak, hedef fiyatına düşünce bildirim al.</p>
+  <a class="btn" href="${PLAY_URL}">Google Play'den indir</a>
+  <nav>
+    <a href="/privacy">Gizlilik Politikası</a>
+    <a href="/destek">Destek</a>
+    <a href="/hesap-silme">Hesap Silme</a>
+  </nav>
+  <p style="font-size:13px">FırsatRadar bağımsız bir uygulamadır; adı geçen mağazalarla bağlantılı değildir. Fiyatlar otomatik toplanır ve hatalı olabilir.</p>
+</main>
+</body>
+</html>`);
+});
+
 // Google Play / App Store yayin formlarindaki "Gizlilik politikasi URL'si"
 // alani icin -- giris gerektirmeyen, herkese acik bir sayfa olmali (bkz.
 // legalPages.js).
